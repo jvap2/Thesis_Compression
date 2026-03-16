@@ -7,7 +7,7 @@ class FlexRoundFP(nn.Module):
     def __init__(self, weight, S_min=0.5, S_max=2.0):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.theta = nn.Parameter(torch.zeros_like(weight), requires_grad=True)
+        self.theta = nn.Parameter(torch.zeros_like(weight, device=self.device))
         self.theta.to(device=self.device)
         self.S_min = S_min
         self.S_max = S_max
@@ -23,7 +23,7 @@ class FlexRoundFP(nn.Module):
         S = torch.clamp(S, self.S_min, self.S_max)
         log_scaled = log_w / S
 
-        exp_q = torch.round(log_scaled)
+        exp_q = (torch.round(log_scaled)-log_scaled).detach()+log_scaled
 
         log_q = exp_q * S
 
@@ -45,7 +45,7 @@ class FlexRoundFPChannel(nn.Module):
         channels = weight.shape[channel_dim]
 
         # log parameterization
-        self.theta = nn.Parameter(torch.zeros(channels), requires_grad=True)
+        self.theta = nn.Parameter(torch.zeros(channels, device=self.device))
         self.theta.to(device=self.device)
 
     def forward(self, w):
@@ -64,7 +64,7 @@ class FlexRoundFPChannel(nn.Module):
         S = S.view(shape)
         log_scaled = log_w / S
 
-        exp_q = torch.round(log_scaled)
+        exp_q = (torch.round(log_scaled)-log_scaled).detach()+log_scaled
 
         log_q = exp_q * S
 
@@ -87,7 +87,8 @@ class QuantConv2dFP(nn.Conv2d):
         )
 
         self.weight.data = conv.weight.data.clone()
-
+        if conv.bias is not None:
+            self.bias.data = conv.bias.data.clone()
         self.flex = FlexRoundFPChannel(self.weight)
 
     def forward(self, x):
@@ -132,13 +133,19 @@ class QuantLinearFP(nn.Linear):
 
 def convert_to_fp_quant(module):
 
+    # Handle root modules first
+    if isinstance(module, nn.Conv2d):
+        return QuantConv2dFP(module)
+
+    if isinstance(module, nn.Linear):
+        return QuantLinearFP(module)
+
+    # Otherwise recurse through children
     for name, child in module.named_children():
 
-        if isinstance(child, nn.Conv2d):
-            setattr(module, name, QuantConv2dFP(child))
+        new_child = convert_to_fp_quant(child)
 
-        elif isinstance(child, nn.Linear):
-            setattr(module, name, QuantLinearFP(child))
+        if new_child is not child:
+            setattr(module, name, new_child)
 
-        else:
-            convert_to_fp_quant(child)
+    return module

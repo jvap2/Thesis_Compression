@@ -58,16 +58,15 @@ def brecq_quantize_exp_fp(model, calibration_loader, name, bitwidth, geometry=Fa
         )
         block_q = copy.deepcopy(block)
         block_q.to(device)
-        convert_to_fp_quant(block_q)
-
-
+        block_q = convert_to_fp_quant(block_q)
+        for name, module in block_q.named_modules():
+            print(name, type(module))
         reconstruct_block_fp(
             block,
             block_q,
             inputs,
             iters=iters,
         )
-
         apply_bias_correction(block, block_q, inputs)
 
         replace_block(model, block, block_q)
