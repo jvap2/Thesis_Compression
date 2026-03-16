@@ -23,7 +23,8 @@ from .utils import (
 
 
 from .brecq import(
-    brecq_quantize
+    brecq_quantize,
+    brecq_quantize_exp,
 )
 
 
@@ -33,8 +34,9 @@ from .frequency_geometry import(
 
 
 from .experimental import (
-    gram_operator_loss,
-    
+    gram_operator_loss_blocks,
+    fourier_probe_loss,
+    operator_sketch_loss,
 )
 
 from .layers import QuantLinear, QuantConv2d
@@ -56,6 +58,10 @@ __all__ = [
     'geometry_aware_rounding_BRECQ',
     'brecq_quantize',
     'cache_block_inputs'
-    'test_vis'
+    'test_vis',
+    'brecq_quantize_exp',
+    'gram_operator_loss_blocks',
+    'fourier_probe_loss',
+    'operator_sketch_loss',
 ]
 

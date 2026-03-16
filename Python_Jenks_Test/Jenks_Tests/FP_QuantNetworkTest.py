@@ -1,4 +1,4 @@
-from Quantization_Experiments import QuantLeNet5, QuantLeNet300, Quantdensenet40, Quantresnet56, Quantresnet32, quantvgg19,Torch_to_Brevitas, apply_geometry_aware_quantization, symmetric_uniform_quantize_network, geometry_aware_rounding, geometry_aware_rounding_v2, geometry_aware_rounding_BRECQ, brecq_quantize, test_vis, brecq_quantize_exp
+from FP_Quantization_Experiments import brecq_quantize_exp_fp
 from torchvision import datasets, transforms
 from utils import RandomContrast, RandomGamma, TinyImageNetDataset
 from Quantization_Experiments.utils import QuantNetwork
@@ -14,27 +14,18 @@ import os
 networks = ["LeNet5", "LeNet300", "DenseNet40", "ResNet56", "VGG19", "ResNet32"]
 data = ["MNIST", "CIFAR10", "CIFAR100", "tiny_imagenet"]
 geometry = True
-batch_size = 64
-bitwidth = 2
+batch_size = 512
+bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = networks[-1]
 data = data[2]
 
 if net == "LeNet5":
-    model = QuantLeNet5()
     reg_model = create_lenet5()
     saved_dict = "Best_Results_HPO/LeNet5/best_2025-12-08_15-03-41_MNIST_LeNet5.pth"
     datasets_name = "MNIST"
     csv_file = "LeNet5_data_quant.csv"
 elif net == "LeNet300":
-    model = nn.Sequential(
-                nn.Flatten(),
-                QuantLinear(in_features=784, out_features=300),
-                nn.ReLU(),
-                QuantLinear(in_features=300, out_features=100),
-                nn.ReLU(),
-                QuantLinear(in_features=100, out_features=10),
-            )
     reg_model = nn.Sequential(
                 nn.Flatten(),
                 nn.Linear(in_features=784, out_features=300),
@@ -48,13 +39,11 @@ elif net == "LeNet300":
     csv_file = "LeNet300_data_quant.csv"
 elif net == "DenseNet40":
     reg_model = create_densenet40()
-    model = Quantdensenet40()
     saved_dict = "Best_Results_HPO/DenseNet40/best_2025-11-16_18-44-04_CIFAR10_DenseNet40.pth"
     datasets_name = "cifar10"
     csv_file = "DenseNet40_data_quant.csv"
 elif net == "ResNet56":
     reg_model = resnet56()
-    model = Quantresnet56()
     saved_dict = "Best_Results_HPO/ResNet56/best_2025-11-16_18-44-00_CIFAR10_ResNet56.pth"
     datasets_name = "cifar10"
     csv_file = "ResNet56_data_quant.csv"
@@ -74,7 +63,6 @@ elif net == "ResNet32":
         datasets_name = "tiny_imagenet"
         saved_dict = "Best_Results_HPO/ResNet32/TinyImageNet/best_2025-12-15_10-04-01_tiny_imagenet_ResNet_32.pth"
         csv_file = "ResNet32_TinyImageNet_data_quant.csv"
-    model = Quantresnet32(num_classes=num_classes)
     reg_model = resnet32(num_classes=num_classes)
 elif net == "VGG19":
     if data == "CIFAR10":
@@ -89,9 +77,8 @@ elif net == "VGG19":
         datasets_name = "tiny_imagenet"
         saved_dict = "Best_Results_HPO/VGG-19/TinyImageNet/best_2025-12-31_11-17-06_tiny_imagenet_vgg19.pth"
         csv_file = "VGG19_TinyImageNet_data_quant.csv"
-    model = quantvgg19(dataset=datasets_name)
     reg_model = vgg19(dataset=datasets_name)
-folder_name = f"Quantization_Experiments/{net}_{data}/{bitwidth}_bit"
+folder_name = f"FP_Quantization_Experiments/{net}_{data}/{bitwidth}_bit"
 import os
 os.makedirs(folder_name, exist_ok=True)
 bitwidth_filename = f"{folder_name}/{net}_{data}_bitwidths.txt"
@@ -109,11 +96,6 @@ pruned_filename = f"{folder_name}/{net}_{data}_pruned_weights.txt"
 visual_filename = f"{folder_name}/{net}_{data}_data_visuals.png"
 reg_model.to(device=device)
 reg_model.load_state_dict(torch.load(saved_dict))
-for name, module in reg_model.named_modules():
-    if isinstance(module, (nn.Conv2d, nn.Linear)):
-        print(f"Quantized Weights of {name}: {module.weight}", file=open(pruned_filename, "a"))
-model = Torch_to_Brevitas(model,saved_dict)
-test_vis(reg_model,visual_filename)
 TinyImageNet_PATH = "./datasets/tiny-imagenet-200/"
 CIFAR10_PATH = "./datasets"  # 'cifar10' , 'cifar100', 'tiny_imagenet'
 if datasets_name == 'tiny_imagenet':
@@ -243,26 +225,6 @@ def TestNetwork(model, val_dataset, filepath=accuracy_filename):
     print(f'Accuracy of the quantized model on the test set: {accuracy:.2f}%', file=open(filepath, "w"))
 
 
-print(f"Model: {net}, Dataset: {data} Before", file=open(bitwidth_filename, "w"))
-for name, module in model.named_modules():
-    if isinstance(module, (brevitas.nn.QuantConv2d, brevitas.nn.QuantLinear)):
-        print(f"Layer: {name}, Bitwidth {module.weight_quant.bit_width()}",file=open(bitwidth_filename, "a"))
-        print(f"Quantized weights: {module.weight}", file=open(bitwidth_filename, "a"))
-quant_network = QuantNetwork(model, quant_bias=True)
-'''Print out the model details to see bitwdiths'''
-print(f"Model: {net}, Dataset: {data} After", file=open(bitwidth_filename, "a"))
-for name, module in quant_network.named_modules():
-    if isinstance(module, (brevitas.nn.QuantConv2d, brevitas.nn.QuantLinear)):
-        print(f"Layer: {name}, Bitwidth {module.weight_quant.bit_width()}",file=open(bitwidth_filename, "a"))
-        print(f"Quantized weights: {module.quant_weight()}", file=open(bitwidth_filename, "a"))
-
-for m in quant_network.modules():
-    if hasattr(m,'compile_quant'):
-        m.compile_quant()
-
-
-TestNetwork(quant_network, val_dataset)
-
 '''Now we want to look at the weight histograms in each layer to see how the quantization is working. We can use matplotlib to plot the histograms.'''
 import matplotlib.pyplot as plt
 import numpy as np
@@ -297,7 +259,6 @@ def plot_weights(model):
             plt.savefig(f"{folder_name}/{name}_weights_histogram.png")
             plt.close()
             print(f"File exists after save: {os.path.exists(f'{folder_name}/{name}_weights_histogram.png')}")
-plot_weights(quant_network)
 # Save the sparsity data to a CSV file
 data.to_csv(f"{folder_name}/{csv_file}", index=False)
 plt.figure(figsize=(10, 5))
@@ -333,9 +294,9 @@ import torch
 torch.cuda.empty_cache()
 # quant_model = geometry_aware_rounding_BRECQ(reg_model, val_dataloader, device=device, name=net, bitwidth=bitwidth)
 # quant_model = brecq_quantize(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry)
-quant_model = brecq_quantize_exp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
+quant_model = brecq_quantize_exp_fp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 TestNetwork(quant_model, val_dataset, filepath=accuracy_geometry_filename)
 '''Print out the model details after geometry-aware quantization to see if there are any changes in bitwidths'''
 for name, module in quant_model.named_modules():
     if isinstance(module, (nn.Conv2d, nn.Linear)):
-        print(f"Quantized Weights of {name}: {module.weight_quantizer()}", file=open(bitwidth_geometry_filename, "a"))
+        print(f"Quantized Weights of {name}: {module.weight.data}", file=open(bitwidth_geometry_filename, "a"))

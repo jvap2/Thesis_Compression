@@ -5,7 +5,7 @@ from .utils import cache_block_inputs,geometry_preserve_original_weights,nc_alig
 import copy
 from densenet import DenseBlock, TransitionBlock, BottleneckBlock, BasicBlock
 from resnet import BasicBlock as ResNetBasicBlock
-
+from .experimental import gram_operator_loss_blocks,fourier_probe_loss, operator_sketch_loss
 
 
 
@@ -289,6 +289,165 @@ def reconstruct_block(block_fp, block_q, inputs, last_layer=False, geometry=Fals
                 print("Geometric loss:",loss_geo.item())
             loss += beta_t*loss_geo
         loss += loss_reg
+        loss.backward()
+        optimizer.step()
+
+    return block_q
+
+
+
+def reconstruct_block_exp(
+        block_fp,
+        block_q,
+        inputs,
+        last_layer=False,
+        geometry=False,
+        iters=3000,
+        lr=1e-3,
+        batch_size=1024):
+
+    device = next(block_fp.parameters()).device
+
+    optimizer = torch.optim.Adam(block_q.parameters(), lr=lr)
+
+    lamb = 5e-4
+    beta = 2
+    beta_final = 8
+
+    warmup = int(0.2 * iters)
+
+    ########################################
+    # Precompute targets (BRECQ only)
+    ########################################
+
+    if not geometry:
+        with torch.no_grad():
+            target = block_fp(inputs)
+
+    ########################################
+    # Precompute probes (geometry only)
+    ########################################
+
+    input_shape = inputs.shape
+    ########################################
+    # Optimization loop
+    ########################################
+
+    for i in range(iters):
+
+        optimizer.zero_grad()
+
+        ####################################
+        # Annealing schedule
+        ####################################
+
+        if i < warmup:
+
+            lambda_t = 0
+            beta_t = beta
+
+        else:
+
+            progress = (i - warmup) / (iters - warmup)
+
+            lambda_t = anneal_lambda(lamb, progress=progress)
+            beta_t = anneal_beta(progress, beta, beta_final)
+
+        ####################################
+        # Primary loss
+        ####################################
+
+        if not geometry:
+
+            ################################
+            # Standard BRECQ reconstruction
+            ################################
+
+            loss = block_reconstruction_loss_opt(
+                target,
+                block_q,
+                inputs
+            )
+
+            if i % 100 == 0:
+                print("Reconstruction Loss:", loss.item())
+
+        else:
+
+            ################################
+            # Operator sketch loss
+            ################################
+
+            sketch_loss = 0
+
+            sketch_loss = operator_sketch_loss(block_fp,block_q,input_shape, probes=batch_size)
+
+            ################################
+            # Fourier probe loss
+            ################################
+            fourier_loss = 0
+
+            fourier_loss = fourier_probe_loss(block_fp,block_q,input_shape)
+
+            ################################
+            # Gram operator loss
+            ################################
+
+            gram_loss = gram_operator_loss_blocks(
+                block_fp,
+                block_q
+            )
+
+            ################################
+            # Combined geometry loss
+            ################################
+
+            loss = (
+                1.0 * sketch_loss +
+                0.5 * fourier_loss +
+                0.5 * gram_loss
+            )
+
+            if i % 100 == 0:
+                print("Sketch Loss:", sketch_loss.item())
+                print("Fourier Loss:", fourier_loss.item())
+                print("Gram Loss:", gram_loss.item())
+
+        ####################################
+        # Last layer constraint (optional)
+        ####################################
+
+        # if last_layer:
+
+        #     loss_geo_last = geometry_preserve_original_weights_v2(
+        #         block_fp,
+        #         block_q
+        #     )
+
+        #     if i % 100 == 0:
+        #         print("Last Layer Geometry:", loss_geo_last.item())
+
+        #     loss += beta_t * loss_geo_last
+
+        ####################################
+        # Binary regularization (ALWAYS)
+        ####################################
+
+        loss_reg = block_regularization_loss(
+            block_q,
+            lambda_t,
+            beta_t
+        )
+
+        if i % 100 == 0:
+            print("Regularization Loss:", loss_reg.item())
+
+        loss += loss_reg
+
+        ####################################
+        # Optimization
+        ####################################
+
         loss.backward()
         optimizer.step()
 
@@ -647,6 +806,72 @@ def brecq_quantize(model, calibration_loader,name,bitwidth, geometry=False):
             reconstruct_block(block, block_q, inputs, last_layer=False,geometry=geometry, iters=iters)
         else:
             reconstruct_block(block, block_q, inputs,name==last_name, geometry=geometry, iters=iters)
+
+        apply_bias_correction(block, block_q, inputs)
+
+        replace_block(model, block, block_q)
+
+    return model
+
+def brecq_quantize_exp(model, calibration_loader, name, bitwidth, geometry=False, batch_size=1024):
+
+    iters = 2000
+
+    if bitwidth == 2:
+        iters = 600 if geometry else 800
+    elif bitwidth == 4:
+        iters = 1200 if geometry else 1600
+    elif bitwidth == 6:
+        iters = 1800 if geometry else 2400
+    elif bitwidth == 8:
+        iters = 2400 if geometry else 3200
+
+    model.eval()
+    device = next(model.parameters()).device
+    print(device)
+
+    blocks = get_reconstruct_blocks(model, name)
+    last_name = blocks[-1][0]
+
+    print("Blocks have been reconstructed")
+
+    for block_name, block in blocks:
+
+        inputs = cache_block_input(
+            model,
+            block,
+            calibration_loader,
+            device=device,
+            num_batches=2
+        )
+
+        block_q = copy_block_with_quantizers(block, bitwidth=bitwidth)
+
+        if geometry:
+
+            input_shape = inputs[0].shape
+
+            reconstruct_block_exp(
+                block,
+                block_q,
+                inputs,
+                last_layer=(block_name == last_name),
+                geometry=True,
+                iters=iters,
+                batch_size=batch_size
+            )
+
+        else:
+
+            reconstruct_block_exp(
+                block,
+                block_q,
+                inputs,
+                last_layer=(block_name == last_name),
+                geometry=False,
+                iters=iters,
+                batch_size=batch_size
+            )
 
         apply_bias_correction(block, block_q, inputs)
 
