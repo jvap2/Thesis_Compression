@@ -3,41 +3,45 @@ import torch.nn as nn
 from Quantization_Experiments.brecq import get_reconstruct_blocks, cache_block_input, apply_bias_correction, replace_block
 from .quant_layers_fp import convert_to_fp_quant
 import copy
+import torch.nn.functional as F 
 
 
 
 
-def reconstruct_block_fp(block_fp,
-                         block_q,
-                         inputs,
-                         iters=2000,
-                         lr=1e-3):
+def reconstruct_block_fp(block_fp, block_q, inputs, iters=2000, lr=1e-3):
 
-    optimizer = torch.optim.Adam(block_q.parameters(), lr=lr)
+    block_fp.eval()
+    for p in block_fp.parameters():
+        p.requires_grad = False
+
+    inputs = inputs.detach().clone()
+
+    with torch.no_grad():
+        target = block_fp(inputs).detach()
+
+    optimizer = torch.optim.Adam(
+        [p for n, p in block_q.named_parameters() if "theta" in n],
+        lr=lr
+    )
 
     for i in range(iters):
 
         optimizer.zero_grad()
 
-        with torch.no_grad():
-            out_fp = block_fp(inputs)
+        pred = block_q(inputs)
 
-        out_q = block_q(inputs)
-
-        loss = ((out_q - out_fp) ** 2).mean()
+        loss = F.mse_loss(pred, target)
         if i%100==0:
             print("Loss: ", loss.item())
         loss.backward()
 
         optimizer.step()
 
-    return block_q
-
 
 
 def brecq_quantize_exp_fp(model, calibration_loader, name, bitwidth, geometry=False, batch_size=1024):
 
-    iters = 5000
+    iters = 2000
 
     model.eval()
     device = next(model.parameters()).device
