@@ -19,7 +19,12 @@ bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = networks[-1]
 data = data[2]
-
+precision_config = {
+    "first": (4, 3),
+    "last": (4, 3),
+    "default": (3, 0),
+    "conv": (3, 1),
+}
 if net == "LeNet5":
     reg_model = create_lenet5()
     saved_dict = "Best_Results_HPO/LeNet5/best_2025-12-08_15-03-41_MNIST_LeNet5.pth"
