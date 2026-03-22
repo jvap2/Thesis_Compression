@@ -306,126 +306,383 @@ class QuantLinearFP(nn.Linear):
         return F.linear(x, w_q, self.bias)
     
 
+# class FPScaledLinear(nn.Module):
+#     def __init__(self, linear_layer, exp_bits=2, man_bits=1, block_size=32):
+#         super().__init__()
+#         weight = linear_layer.weight
+#         self.weight = weight.clone().detach()
+#         self.weight.requires_grad = False
+#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#         self.out_features, self.in_features = weight.shape
+#         self.block_size = block_size
+
+#         assert self.in_features % block_size == 0
+#         self.num_blocks = self.in_features // block_size
+
+#         # Generate codebook
+#         self.codebook = generate_fp_codebook(exp_bits, man_bits, device=weight.device)
+
+#         # Scales
+#         self.s_global = nn.Parameter(torch.ones(1, device=self.device))
+#         self.s_block = nn.Parameter(torch.ones(self.num_blocks, device=self.device))
+#     #     self.init_scale()
+#     # def init_scale(self):
+#     #     with torch.no_grad():
+#     #         W = self.weight
+#     #         W_flat = W.view(-1)
+#     #         W_flat_block = W.view(self.num_blocks, -1)
+#     #         # Get max weight per channel
+#     #         w_max = W_flat.abs().max(dim=0)[0]
+#     #         w_max_block = W_flat_block.abs().max(dim=1)[0]
+#     #         # Get max representable FP value
+#     #         q_max = self.codebook.abs().max()
+
+#     #         # Align them
+#     #         scale = (w_max / q_max).view(1)
+#     #         scale_block = (w_max_block/q_max).view(self.num_blocks)
+#     #         self.s_global.copy_(scale.clamp(min=1e-5))
+#     #         self.s_block.copy_(scale_block.clamp(min=1e-5))
+#     def forward(self, x):
+#         W = self.weight
+
+#         W_blocks = W.view(self.out_features, self.num_blocks, self.block_size)
+
+#         s = self.s_global * self.s_block.view(1, -1, 1)
+
+#         W_scaled = W_blocks / (s + 1e-8)
+
+#         W_q = fp_quantize(W_scaled, self.codebook)
+
+#         W_hat = W_q * s
+
+#         W_hat = W_hat.view(self.out_features, self.in_features)
+
+#         return F.linear(x, W_hat)
+    
 class FPScaledLinear(nn.Module):
-    def __init__(self, weight, E=2, M=1, block_size=32):
+    """
+    Linear layer quantized with the FlexRound element-wise division scheme.
+ 
+    Parameters
+    ----------
+    s1  : scalar, learnable quantization grid size (common across the layer)
+    S2  : [out_features, in_features], element-wise division factor
+    s3  : [out_features, 1], per-output-channel correction
+ 
+    Quantization formula (matches Eq.2 of FlexRound for linear layers):
+        S     = s1 * S2 * s3          # full division tensor, shape [O, I]
+        W_hat = s1 * fp_quant(W / S)  # dequant uses s1 ONLY
+ 
+    Gradient coupling (analogous to Proposition 3.1):
+        ∂L/∂S'_(i,j) = −W_(i,j) / S'²_(i,j)  *  ∂L/∂W_hat_(i,j)
+    where S' = S2 ⊙ s3, so updates to S' are proportional to W_(i,j).
+    """
+    def __init__(
+        self,
+        linear_layer:  nn.Linear,
+        exp_bits:      int  = 2,
+        man_bits:      int  = 1,
+        block_size:    int  = 32,
+        restrict_s2:   bool = False,   # True for last layer
+    ):
         super().__init__()
-
-        self.weight = weight.clone().detach()
-        self.weight.requires_grad = False
-
-        self.out_features, self.in_features = weight.shape
+        W = linear_layer.weight.detach().clone()   # [O, I]
+        self.register_buffer("weight", W)
+        self.out_features, self.in_features = W.shape
         self.block_size = block_size
 
-        assert self.in_features % block_size == 0
-        self.num_blocks = self.in_features // block_size
+        self.bias = (
+            linear_layer.bias.detach().clone()
+            if linear_layer.bias is not None else None
+        )
 
-        # Generate codebook
-        self.codebook = generate_fp_codebook(E, M, device=weight.device)
+        device   = W.device
+        codebook = generate_fp_codebook(exp_bits, man_bits, device=device)
+        self.register_buffer("codebook", codebook)
 
-        # Scales
-        self.s_global = nn.Parameter(torch.ones(1))
-        self.s_block = nn.Parameter(torch.ones(self.num_blocks))
+        # Number of blocks along input dimension
+        # Pad if necessary so blocks divide evenly
+        pad = (block_size - self.in_features % block_size) % block_size
+        self.pad = pad
+        I_padded  = self.in_features + pad
+        self.num_blocks = I_padded // block_size
+
+        # ---- s_global: single scalar, calibrated ----
+        s_global_init = calibrate_s_global(W, codebook)
+        self.s_global = nn.Parameter(s_global_init)
+
+        # ---- s_block: [O, num_blocks], power-of-two constrained ----
+        W_padded = F.pad(W, (0, pad)) if pad > 0 else W
+        W_blocks = W_padded.reshape(self.out_features, self.num_blocks, block_size)
+        s_block_init = init_s_block(W_blocks, s_global_init, codebook)
+        self.s_block = nn.Parameter(s_block_init)   # [O, num_blocks]
+
+        # ---- S2: per-element FlexRound factor ----
+        if restrict_s2:
+            self.S2 = nn.Parameter(torch.ones(self.out_features, 1, device=device))
+        else:
+            self.S2 = nn.Parameter(torch.ones(self.out_features, self.in_features, device=device))
+
+    def get_S(self):
+        """
+        Build the full [O, I] division tensor from the hierarchy.
+        s_block is quantized to powers of two via STE.
+        """
+        # Quantize s_block to nearest power of two (STE in backward)
+        s_block_q = quantize_to_pow2(self.s_block.abs().clamp(min=1e-8))  # [O, num_blocks]
+
+        # Expand s_block to per-element: [O, num_blocks] -> [O, I_padded]
+        s_block_exp = s_block_q.unsqueeze(-1).expand(
+            self.out_features, self.num_blocks, self.block_size
+        ).reshape(self.out_features, -1)
+
+        # Trim padding
+        if self.pad > 0:
+            s_block_exp = s_block_exp[:, :self.in_features]
+
+        # Full division factor
+        S = self.s_global.abs() * s_block_exp * self.S2.abs()
+        return S.clamp(min=1e-8)
+
+    def get_u(self):
+        return self.weight / self.get_S()
 
     def forward(self, x):
-        W = self.weight
+        W_hat = fp_quantize(self.get_u(), self.codebook) * self.s_global.abs()
+        return F.linear(x, W_hat, self.bias)
 
-        W_blocks = W.view(self.out_features, self.num_blocks, self.block_size)
+    def get_block_exponents(self):
+        """
+        At inference: extract integer exponents of s_block for e8m0 storage.
+        Returns an int8 tensor of shape [O, num_blocks].
+        """
+        with torch.no_grad():
+            s_block_q = quantize_to_pow2(self.s_block.abs().clamp(min=1e-8))
+            exponents = torch.log2(s_block_q).round().to(torch.int8)
+        return exponents
 
-        s = self.s_global * self.s_block.view(1, -1, 1)
 
-        W_scaled = W_blocks / (s + 1e-8)
+# class FPScaledConv2d(nn.Module):
+#     def __init__(self, conv_layer, exp_bits=2, man_bits=1, block_size=9):
+#         super().__init__()
 
-        W_q = fp_quantize(W_scaled, self.codebook)
+#         # Copy weights
+#         self.weight = conv_layer.weight.detach().clone()
+#         self.weight.requires_grad = False
+#         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#         self.bias = None
+#         if conv_layer.bias is not None:
+#             self.bias = conv_layer.bias.detach().clone()
 
-        W_hat = W_q * s
+#         # Conv params
+#         self.stride = conv_layer.stride
+#         self.padding = conv_layer.padding
+#         self.dilation = conv_layer.dilation
+#         self.groups = conv_layer.groups
 
-        W_hat = W_hat.view(self.out_features, self.in_features)
+#         # Shape
+#         self.out_channels, self.in_channels, self.kH, self.kW = self.weight.shape
 
-        return F.linear(x, W_hat)
-    
+#         # Flatten per output channel
+#         self.flat_dim = self.in_channels * self.kH * self.kW
 
+#         assert self.flat_dim % block_size == 0, "flat_dim must be divisible by block_size"
+
+#         self.block_size = block_size
+#         self.num_blocks = self.flat_dim // block_size
+
+#         # Codebook
+#         self.codebook = generate_fp_codebook(exp_bits, man_bits, device=self.device)
+
+#         # ===== SCALE PARAMETERS =====
+
+#         # Per-channel scale: [O, 1]
+#         self.s_channel = nn.Parameter(torch.ones(self.out_channels, 1, 1, 1, device=self.device), requires_grad=True)
+#         self.init_scale()
+#         # Per-channel, per-block scale: [O, B]
+#         # self.s_block = nn.Parameter(torch.ones(self.out_channels, self.num_blocks, device=self.device))
+
+#     def init_scale(self):
+#         with torch.no_grad():
+#             W = self.weight
+#             W_flat = W.view(self.out_channels, -1)
+
+#             # Use max instead of mean
+#             scale = W_flat.abs().max(dim=1)[0].view(self.out_channels, 1, 1, 1)
+
+#             # Avoid zero
+#             scale = scale.clamp(min=1e-5)
+
+#             self.s_channel.copy_(scale)
+
+#     def forward(self, x):
+#         W = self.weight
+
+#         # Flatten: [O, flat_dim]
+#         W_flat = W.view(self.out_channels, self.flat_dim)
+
+#         # Block reshape: [O, B, block_size]
+#         W_blocks = W_flat.view(self.out_channels, self.num_blocks, self.block_size)
+
+#         # Construct full scale: [O, B, 1]
+#         # s = self.s_channel.view(self.out_channels, 1, 1) * \
+#             # self.s_block.view(self.out_channels, self.num_blocks, 1)
+#         s = self.s_channel.view(self.out_channels, 1, 1)
+#         # Scale down
+#         W_scaled = W_blocks / (s + 1e-8)
+
+#         # Quantize
+#         W_q = fp_quantize(W_scaled, self.codebook)
+
+#         # Dequantize
+#         W_hat_blocks = W_q * s
+
+#         # Reshape back
+#         W_hat_flat = W_hat_blocks.view(self.out_channels, self.flat_dim)
+#         W_hat = W_hat_flat.view(
+#             self.out_channels,
+#             self.in_channels,
+#             self.kH,
+#             self.kW
+#         )
+
+#         return F.conv2d(
+#             x,
+#             W_hat,
+#             bias=self.bias,
+#             stride=self.stride,
+#             padding=self.padding,
+#             dilation=self.dilation,
+#             groups=self.groups
+#         )
 
 
 class FPScaledConv2d(nn.Module):
-    def __init__(self, conv_layer, E=2, M=1, block_size=32):
+    """
+    Conv2d layer quantized with the FlexRound element-wise division scheme.
+ 
+    Per the paper (Eq.2 for 2D convolution):
+        S  = s1 * S2 * s3 * s4
+        s3 : [O, 1, 1, 1]  — per-output-channel
+        s4 : [1, I, 1, 1]  — per-input-channel
+        S2 : [O, I, kH, kW] — element-wise
+    """
+ 
+    def __init__(
+        self,
+        conv_layer: nn.Conv2d,
+        exp_bits:   int = 2,
+        man_bits:   int = 1,
+        block_size: int = 32,
+    ):
         super().__init__()
-
-        # Copy weights
-        self.weight = conv_layer.weight.detach().clone()
-        self.weight.requires_grad = False
-
-        self.bias = None
-        if conv_layer.bias is not None:
-            self.bias = conv_layer.bias.detach().clone()
-
-        # Conv params
-        self.stride = conv_layer.stride
-        self.padding = conv_layer.padding
-        self.dilation = conv_layer.dilation
-        self.groups = conv_layer.groups
-
-        # Shape
-        self.out_channels, self.in_channels, self.kH, self.kW = self.weight.shape
-
-        # Flatten per output channel
-        self.flat_dim = self.in_channels * self.kH * self.kW
-
-        assert self.flat_dim % block_size == 0, "flat_dim must be divisible by block_size"
-
+        W = conv_layer.weight.detach().clone()  # [O, I, kH, kW]
+        self.register_buffer("weight", W)
+        self.out_channels, self.in_channels, self.kH, self.kW = W.shape
+        self.flat_dim  = self.in_channels * self.kH * self.kW
         self.block_size = block_size
-        self.num_blocks = self.flat_dim // block_size
 
-        # Codebook
-        self.codebook = generate_fp_codebook(E, M, device=self.weight.device)
+        self.bias     = conv_layer.bias.detach().clone() if conv_layer.bias is not None else None
+        self.stride   = conv_layer.stride
+        self.padding  = conv_layer.padding
+        self.dilation = conv_layer.dilation
+        self.groups   = conv_layer.groups
 
-        # ===== SCALE PARAMETERS =====
+        device   = W.device
+        codebook = generate_fp_codebook(exp_bits, man_bits, device=device)
+        self.register_buffer("codebook", codebook)
 
-        # Per-channel scale: [O, 1]
-        self.s_channel = nn.Parameter(torch.ones(self.out_channels, 1))
+        pad = (block_size - self.flat_dim % block_size) % block_size
+        self.pad = pad
+        flat_padded   = self.flat_dim + pad
+        self.num_blocks = flat_padded // block_size
 
-        # Per-channel, per-block scale: [O, B]
-        self.s_block = nn.Parameter(torch.ones(self.out_channels, self.num_blocks))
+        # W flattened per output channel: [O, flat_dim]
+        W_flat    = W.reshape(self.out_channels, self.flat_dim)
+        s_global_init = calibrate_s_global(W_flat, codebook)
+        self.s_global = nn.Parameter(s_global_init)
+
+        W_padded  = F.pad(W_flat, (0, pad)) if pad > 0 else W_flat
+        W_blocks  = W_padded.reshape(self.out_channels, self.num_blocks, block_size)
+        s_block_init = init_s_block(W_blocks, s_global_init, codebook)
+        self.s_block = nn.Parameter(s_block_init)   # [O, num_blocks]
+
+        self.S2 = nn.Parameter(torch.ones(self.out_channels, self.flat_dim, device=device))
+
+    def get_S(self):
+        s_block_q   = quantize_to_pow2(self.s_block.abs().clamp(min=1e-8))
+        s_block_exp = s_block_q.unsqueeze(-1).expand(
+            self.out_channels, self.num_blocks, self.block_size
+        ).reshape(self.out_channels, -1)
+
+        if self.pad > 0:
+            s_block_exp = s_block_exp[:, :self.flat_dim]
+
+        S = self.s_global.abs() * s_block_exp * self.S2.abs()
+        return S.clamp(min=1e-8)
+
+    def get_u(self):
+        W_flat = self.weight.reshape(self.out_channels, self.flat_dim)
+        return W_flat / self.get_S()
 
     def forward(self, x):
-        W = self.weight
-
-        # Flatten: [O, flat_dim]
-        W_flat = W.view(self.out_channels, self.flat_dim)
-
-        # Block reshape: [O, B, block_size]
-        W_blocks = W_flat.view(self.out_channels, self.num_blocks, self.block_size)
-
-        # Construct full scale: [O, B, 1]
-        s = self.s_channel.view(self.out_channels, 1, 1) * \
-            self.s_block.view(self.out_channels, self.num_blocks, 1)
-
-        # Scale down
-        W_scaled = W_blocks / (s + 1e-8)
-
-        # Quantize
-        W_q = fp_quantize(W_scaled, self.codebook)
-
-        # Dequantize
-        W_hat_blocks = W_q * s
-
-        # Reshape back
-        W_hat_flat = W_hat_blocks.view(self.out_channels, self.flat_dim)
-        W_hat = W_hat_flat.view(
-            self.out_channels,
-            self.in_channels,
-            self.kH,
-            self.kW
+        u     = self.get_u()
+        W_q   = fp_quantize(u, self.codebook)
+        W_hat = (W_q * self.s_global.abs()).reshape(
+            self.out_channels, self.in_channels, self.kH, self.kW
         )
+        return F.conv2d(x, W_hat, bias=self.bias,
+                        stride=self.stride, padding=self.padding,
+                        dilation=self.dilation, groups=self.groups)
 
-        return F.conv2d(
-            x,
-            W_hat,
-            bias=self.bias,
-            stride=self.stride,
-            padding=self.padding,
-            dilation=self.dilation,
-            groups=self.groups
-        )
+    def get_block_exponents(self):
+        with torch.no_grad():
+            s_block_q = quantize_to_pow2(self.s_block.abs().clamp(min=1e-8))
+            return torch.log2(s_block_q).round().to(torch.int8)
+
+
+
+
+def calibrate_s_global(W, codebook, grid_size=100):
+    """
+    Grid search over s_global values to minimize RTN quantization error.
+    More robust than w_max/q_max heuristic for large-range codebooks.
+    """
+    w_max = W.abs().max().clamp(min=1e-5)
+    q_max = codebook.abs().max()
+
+    s_min = w_max / q_max
+    s_max = w_max / (q_max * 0.5)
+
+    best_s, best_err = s_min, float("inf")
+    for i in range(grid_size):
+        s_cand = s_min + (s_max - s_min) * i / grid_size
+        u      = W / s_cand.clamp(min=1e-8)
+        W_hat  = fp_quantize(u, codebook) * s_cand
+        err    = (W - W_hat).pow(2).mean().item()
+        if err < best_err:
+            best_err, best_s = err, s_cand
+
+    return best_s.reshape(1)
+
+
+def init_s_block(W_blocks, s_global, codebook):
+    """
+    Initialize s_block per block as the nearest power of two to the
+    per-block w_max/q_max ratio, corrected for s_global.
+
+    W_blocks: [..., block_size] — weight tensor reshaped into blocks
+    Returns:  [...] — one scale per block, already snapped to power of two
+    """
+    q_max         = codebook.abs().max()
+    w_max_per_block = W_blocks.abs().amax(dim=-1).clamp(min=1e-5)
+
+    # Raw per-block scale relative to global scale
+    s_raw = w_max_per_block / (q_max * s_global.abs().clamp(min=1e-8))
+
+    # Snap to nearest power of two immediately
+    log2_s = torch.log2(s_raw.clamp(min=1e-8))
+    return 2.0 ** log2_s.round()
 
 
 def convert_to_fp_quant(module, module_config=None):
@@ -475,6 +732,36 @@ def convert_to_fp_quant_flex(module, layer_name="", is_first=False, is_last=Fals
             setattr(module, name, new_child)
 
     return module
+
+
+def convert_to_fp_quant_flex_scale(module, layer_name="", is_first=False, is_last=False):
+
+    if isinstance(module, nn.Conv2d):
+
+        cfg = get_layer_config(layer_name, is_first, is_last)
+
+        return FPScaledConv2d(module, **cfg)
+
+    if isinstance(module, nn.Linear):
+
+        cfg = get_layer_config(layer_name, is_first, is_last)
+
+        return FPScaledLinear(module, **cfg)
+
+    for name, child in module.named_children():
+
+        new_child = convert_to_fp_quant_flex_scale(
+            child,
+            layer_name=name,
+            is_first=is_first,
+            is_last=is_last
+        )
+
+        if new_child is not child:
+            setattr(module, name, new_child)
+
+    return module
+
 
 
 def solve_channelwise_scale(y_fp, y_q, layer_type):
@@ -573,21 +860,40 @@ def fp_quantize(x, codebook):
     return FPQuantizerSTE.apply(x, codebook)
 
 
-
-
-def generate_fp_codebook(E, M, device="cuda", include_subnormals=False):
+class PowerOfTwoSTE(torch.autograd.Function):
     """
-    Generate FP(e, m) codebook (normalized only by default)
+    Forward:  round s to nearest power of two.
+              Equivalent to rounding log2(s) to nearest integer.
+    Backward: straight-through — gradient passes through as if identity.
 
-    E: exponent bits
-    M: mantissa bits
+    This constrains s_block to powers of two at inference while allowing
+    gradient flow during training. The STE is appropriate here for the
+    same reason it is for weight quantization — the discrete rounding
+    operation is non-differentiable but locally approximated as identity.
+
+    Hardware note: at inference, replace s_block with its integer exponent
+    (log2(s_block).round().int()) and implement as a bit-shift.
     """
+    @staticmethod
+    def forward(ctx, s):
+        log2_s      = torch.log2(s.abs().clamp(min=1e-8))
+        log2_s_round = log2_s.round()
+        return (2.0 ** log2_s_round) * s.sign()
 
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
+
+
+def quantize_to_pow2(s):
+    return PowerOfTwoSTE.apply(s)
+
+
+def generate_fp_codebook(E, M, device="cuda"):
     bias = 2 ** (E - 1) - 1
 
     codebook = []
 
-    # Normalized exponents
     e_min = 1 - bias
     e_max = (2 ** E - 2) - bias
 
@@ -597,12 +903,9 @@ def generate_fp_codebook(E, M, device="cuda", include_subnormals=False):
             codebook.append(val)
             codebook.append(-val)
 
-    # Zero
     codebook.append(0.0)
 
     codebook = torch.tensor(codebook, device=device)
-
-    # Remove duplicates + sort
     codebook = torch.unique(codebook)
     codebook, _ = torch.sort(codebook)
 

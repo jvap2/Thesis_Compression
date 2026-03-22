@@ -1,4 +1,4 @@
-from FP_Quantization_Experiments import brecq_quantize_exp_fp
+from FP_Quantization_Experiments import brecq_quantize_exp_fp, brecq_quantize_exp_fp_scale
 from torchvision import datasets, transforms
 from utils import RandomContrast, RandomGamma, TinyImageNetDataset
 from Quantization_Experiments.utils import QuantNetwork
@@ -18,7 +18,7 @@ batch_size = 1024
 bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = networks[-1]
-data = data[2]
+data = data[1]
 precision_config = {
     "first": (4, 3),
     "last": (4, 3),
@@ -299,7 +299,8 @@ import torch
 torch.cuda.empty_cache()
 # quant_model = geometry_aware_rounding_BRECQ(reg_model, val_dataloader, device=device, name=net, bitwidth=bitwidth)
 # quant_model = brecq_quantize(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry)
-quant_model = brecq_quantize_exp_fp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
+# quant_model = brecq_quantize_exp_fp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
+quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 TestNetwork(quant_model, val_dataset, filepath=accuracy_geometry_filename)
 '''Print out the model details after geometry-aware quantization to see if there are any changes in bitwidths'''
 for name, module in quant_model.named_modules():
