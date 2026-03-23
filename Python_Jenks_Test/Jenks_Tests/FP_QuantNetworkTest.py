@@ -1,4 +1,4 @@
-from FP_Quantization_Experiments import brecq_quantize_exp_fp, brecq_quantize_exp_fp_scale
+from FP_Quantization_Experiments import brecq_quantize_exp_fp, brecq_quantize_exp_fp_scale, quantize_model_fp
 from torchvision import datasets, transforms
 from utils import RandomContrast, RandomGamma, TinyImageNetDataset
 from Quantization_Experiments.utils import QuantNetwork
@@ -14,7 +14,7 @@ import os
 networks = ["LeNet5", "LeNet300", "DenseNet40", "ResNet56", "VGG19", "ResNet32"]
 data = ["MNIST", "CIFAR10", "CIFAR100", "tiny_imagenet"]
 geometry = True
-batch_size = 1024
+batch_size = 32
 bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = networks[-1]
@@ -300,7 +300,8 @@ torch.cuda.empty_cache()
 # quant_model = geometry_aware_rounding_BRECQ(reg_model, val_dataloader, device=device, name=net, bitwidth=bitwidth)
 # quant_model = brecq_quantize(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry)
 # quant_model = brecq_quantize_exp_fp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
-quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
+# quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
+quant_model = quantize_model_fp(reg_model,val_dataloader, block_size=16, weight_exp = 2, weight_mant = 1, e_bits_scale = 8, m_bits_scale=0)
 TestNetwork(quant_model, val_dataset, filepath=accuracy_geometry_filename)
 '''Print out the model details after geometry-aware quantization to see if there are any changes in bitwidths'''
 for name, module in quant_model.named_modules():
