@@ -14,7 +14,7 @@ import os
 networks = ["LeNet5", "LeNet300", "DenseNet40", "ResNet56", "VGG19", "ResNet32"]
 data = ["MNIST", "CIFAR10", "CIFAR100", "tiny_imagenet"]
 geometry = True
-batch_size = 32
+batch_size = 512
 bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 net = networks[-1]

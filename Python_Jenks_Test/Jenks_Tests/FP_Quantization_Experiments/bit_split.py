@@ -278,6 +278,81 @@ def optimize_block_activation(w_block, X_block, Y_block,
 
     return alpha_b.detach(), e_opt.detach(), m_opt.detach()
 
+
+
+
+
+def optimize_block_activation_v2(
+    w_block,
+    X_block,
+    residual,
+    exponent_bits=2,
+    mantissa_bits=1,
+    iters=5,
+):
+    """
+    Block coordinate descent:
+    - α: closed form (LS)
+    - e, m: greedy updates
+    """
+
+    device = X_block.device
+
+    # exponent setup
+    e_range = 2 ** exponent_bits
+    bias = 2**(exponent_bits - 1) - 1
+
+    # initialize exponent from weights
+    log_abs = torch.log2(w_block.abs() + 1e-8)
+    e_opt = torch.clamp(torch.floor(log_abs).long() + bias, 0, e_range - 1)
+
+    # initialize mantissa
+    m_opt = torch.zeros_like(w_block, dtype=torch.long, device=device)
+
+    for _ in range(iters):
+
+        # ---- build phi (quantized basis) ----
+        scale = 2.0 ** (e_opt.float() - bias)
+
+        if mantissa_bits > 0:
+            phi = scale * (1.0 + m_opt.float() / (2**mantissa_bits - 1))
+        else:
+            phi = scale
+
+        # ---- closed-form α (KEY STEP) ----
+        X_phi = X_block @ phi
+        denom = (X_phi * X_phi).sum() + 1e-8
+        alpha = (residual * X_phi).sum() / denom
+
+        # ---- update mantissa (greedy) ----
+        if mantissa_bits > 0:
+            with torch.no_grad():
+                target = w_block / (alpha + 1e-8) / scale
+                m_opt = torch.clamp(
+                    torch.round((target - 1) * (2**mantissa_bits - 1)),
+                    0,
+                    2**mantissa_bits - 1
+                ).long()
+
+        # ---- update exponent (greedy) ----
+        with torch.no_grad():
+            target = torch.log2(torch.abs(w_block / (alpha + 1e-8)) + 1e-8)
+            e_opt = torch.clamp(
+                torch.round(target).long() + bias,
+                0,
+                e_range - 1
+            )
+
+    # final weights
+    scale = 2.0 ** (e_opt.float() - bias)
+    if mantissa_bits > 0:
+        phi = scale * (1.0 + m_opt.float() / (2**mantissa_bits - 1))
+    else:
+        phi = scale
+
+    w_hat = alpha * phi
+
+    return alpha, e_opt, m_opt, w_hat
 # =========================================================
 # 🔹 CORE RECONSTRUCTION
 # =========================================================
@@ -437,12 +512,11 @@ def reconstruct_layer_fp_block(layer, layer_input, block_size=64,
             # ✅ correct target
             Y_block = X_block @ w_block             # [N]
 
-            alpha_b, e_opt, m_opt = optimize_block_activation(
+            alpha_b, e_opt, m_opt = optimize_block_activation_v2(
                 w_block, X_block, Y_block,
-                iters=iters, lr=lr,
                 exponent_bits=exponent_bits,
                 mantissa_bits=mantissa_bits,
-                device=device
+                iters=50,
             )
 
             if geometry:
@@ -457,7 +531,65 @@ def reconstruct_layer_fp_block(layer, layer_input, block_size=64,
 
     return alpha_blocks, e_blocks, m_blocks, weight_indices
 
+def reconstruct_layer_fp_block_v2(
+    layer,
+    layer_input,
+    block_size=64,
+    exponent_bits=2,
+    mantissa_bits=1,
+    device="cuda",
+):
+    """
+    Correct block-coordinate reconstruction with residual updates.
+    """
 
+    layer = layer.to(device)
+    layer_input = layer_input.to(device)
+
+    W_mat, X_mat = extract_matrix(layer, layer_input)
+
+    W_mat = W_mat.to(device)
+    X_mat = X_mat.to(device)
+
+    N, in_features = X_mat.shape
+    out_features = W_mat.shape[0]
+
+    # full target
+    Y_full = X_mat @ W_mat.T   # [N, out]
+
+    # initialize quantized weights
+    W_q = torch.zeros_like(W_mat)
+
+    for o in range(out_features):
+
+        # residual starts as full output
+        residual = Y_full[:, o].clone()
+
+        w_row = W_mat[o]
+
+        # process blocks sequentially
+        for start in range(0, in_features, block_size):
+            end = min(start + block_size, in_features)
+
+            w_block = w_row[start:end]
+            X_block = X_mat[:, start:end]
+
+            # ---- optimize block against residual ----
+            alpha, e, m, w_hat = optimize_block_activation_v2(
+                w_block,
+                X_block,
+                residual,
+                exponent_bits=exponent_bits,
+                mantissa_bits=mantissa_bits,
+            )
+
+            # ---- write weights ----
+            W_q[o, start:end] = w_hat
+
+            # ---- update residual (CRITICAL) ----
+            residual = residual - X_block @ w_hat
+
+    return W_q
 # =========================================================
 # 🔹 QUANTIZED LINEAR LAYER
 # =========================================================
@@ -486,34 +618,42 @@ class QuantLinearFP(nn.Module):
     def calibrate(self, X):
         # with torch.no_grad():
         print("Reconstructing", self.__class__.__name__)
-
+        X=X.detach()
         # Run block-wise FP4 reconstruction
-        alpha_blocks, e_blocks, m_blocks, weight_indices = reconstruct_layer_fp_block(
-            self.conv,
+        # alpha_blocks, e_blocks, m_blocks, weight_indices = reconstruct_layer_fp_block(
+        #     self.linear,
+        #     X,
+        #     block_size=self.block_size,
+        #     exponent_bits=self.e_bits_scale,
+        #     mantissa_bits=self.m_bits_scale
+        # )
+        W_q_mat = reconstruct_layer_fp_block_v2(
+            self.linear,
             X,
             block_size=self.block_size,
             exponent_bits=self.e_bits_scale,
-            mantissa_bits=self.m_bits_scale
+            mantissa_bits=self.m_bits_scale,
+            device=X.device
         )
 
         # Reconstruct the full FP4 weight tensor from blocks
-        W_q = torch.zeros_like(self.conv.weight, device=self.conv.weight.device)
-        bias = 2**(self.e_bits_scale - 1) - 1
+        # W_q = torch.zeros_like(self.linear.weight, device=self.linear.weight.device)
+        # bias = 2**(self.e_bits_scale - 1) - 1
 
-        for alpha_b, e_b, m_b, (o, in_indices) in zip(alpha_blocks, e_blocks, m_blocks, weight_indices):
+        # for alpha_b, e_b, m_b, (o, in_indices) in zip(alpha_blocks, e_blocks, m_blocks, weight_indices):
 
-            scale = (2.0 ** (e_b.float() - bias))
+        #     scale = (2.0 ** (e_b.float() - bias))
 
-            coarse = alpha_b * scale
+        #     coarse = alpha_b * scale
 
-            if self.m_bits_scale > 0:
-                fine = coarse * m_b.float() / (2**self.m_bits_scale - 1)
-            else:
-                fine = 0.0
-            W_q[o, in_indices] = coarse + fine
+        #     if self.m_bits_scale > 0:
+        #         fine = coarse * m_b.float() / (2**self.m_bits_scale - 1)
+        #     else:
+        #         fine = 0.0
+        #     W_q[o, in_indices] = coarse + fine
 
         # Reshape back to the original conv weight shape
-        self.weight_q = W_q
+        self.weight_q = W_q_mat.view_as(self.linear.weight)
 
     def forward(self, x):
         if self.weight_q is None:
@@ -559,34 +699,41 @@ class QuantConv2dFP(nn.Module):
     def calibrate(self, X):
         # with torch.no_grad():
         print("Reconstructing", self.__class__.__name__)
-
+        X=X.detach()
         # Run block-wise FP4 reconstruction
-        alpha_blocks, e_blocks, m_blocks, weight_indices = reconstruct_layer_fp_block(
+        # alpha_blocks, e_blocks, m_blocks, weight_indices = reconstruct_layer_fp_block(
+        #     self.conv,
+        #     X,
+        #     block_size=self.block_size,
+        #     exponent_bits=self.e_bits_scale,
+        #     mantissa_bits=self.m_bits_scale
+        # )
+        W_q_mat = reconstruct_layer_fp_block_v2(
             self.conv,
             X,
             block_size=self.block_size,
             exponent_bits=self.e_bits_scale,
-            mantissa_bits=self.m_bits_scale
+            mantissa_bits=self.m_bits_scale,
+            device=X.device
         )
-
         # Reconstruct the full FP4 weight tensor from blocks
-        W_mat, _ = extract_matrix(self.conv, X)
-        W_q = torch.zeros_like(W_mat)
-        bias = 2**(self.e_bits_scale - 1) - 1
+        # W_mat, _ = extract_matrix(self.conv, X)
+        # W_q = torch.zeros_like(W_mat)
+        # bias = 2**(self.e_bits_scale - 1) - 1
 
-        for alpha_b, e_b, m_b, (o, in_indices) in zip(alpha_blocks, e_blocks, m_blocks, weight_indices):
+        # for alpha_b, e_b, m_b, (o, in_indices) in zip(alpha_blocks, e_blocks, m_blocks, weight_indices):
 
-            scale = (2.0 ** (e_b.float() - bias))
+        #     scale = (2.0 ** (e_b.float() - bias))
 
-            coarse = alpha_b * scale
+        #     coarse = alpha_b * scale
 
-            if self.m_bits_scale > 0:
-                fine = coarse * m_b.float() / (2**self.m_bits_scale - 1)
-            else:
-                fine = 0.0
-            W_q[o, in_indices] = coarse + fine
+        #     if self.m_bits_scale > 0:
+        #         fine = coarse * m_b.float() / (2**self.m_bits_scale - 1)
+        #     else:
+        #         fine = 0.0
+        #     W_q[o, in_indices] = coarse + fine
 
-        W_q = W_q.view_as(self.conv.weight)
+        W_q = W_q_mat.view_as(self.conv.weight)
         self.weight_q = W_q
 
     def forward(self, x):
