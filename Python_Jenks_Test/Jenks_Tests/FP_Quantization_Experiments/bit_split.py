@@ -1026,7 +1026,7 @@ def calibrate_model(model, data_loader, device="cuda"):
 
 def calibrate_model_HG(model, data_loader, device="cuda"):
     model.eval().to(device)
-    H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device)
+    # H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device)
     H_dict = compute_hessian_diag_model(model, data_loader, device)
     print(H_dict)
     for keys in H_dict.keys():
@@ -1046,6 +1046,23 @@ def calibrate_model_HG(model, data_loader, device="cuda"):
 
     return model
 
+def calibrate_model_Hessian_block(model, data_loader, block_size, device):
+    model.eval().to(device)
+    H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device, block_size)
+    for module in model.modules():
+        if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
+            # Determine the underlying weight module
+            if hasattr(module, "linear") and module.linear in H_dict_block:
+                H_diag = H_dict_block[module.linear]
+            elif hasattr(module, "conv") and module.conv in H_dict_block:
+                H_diag = H_dict_block[module.conv]
+            else:
+                print("⚠️ Missing Hessian for", module)
+                continue
+
+            module.calibrate_Hessian_block(data_loader, device, H_diag)
+
+    return model
 def fold_bn_into_conv(conv, bn):
     """
     Fold BatchNorm into Conv2d
@@ -1115,23 +1132,38 @@ def quantize_model_fp(model,
                       e_bits_scale=8,
                       m_bits_scale=0,
                       device="cuda",
-                      use_HG=True):
+                      use_HG=True,
+                      use_Hessian=False):
+    """
+    Quantize a model to FP4-like format with optional HG or Hessian calibration.
+    """
+
     model = fold_bn_recursively(model)
 
-    # 🔹 (optional but recommended)
-    # freeze weights after folding
+    # Freeze weights after folding
     for p in model.parameters():
         p.requires_grad = False
+
+    # Replace layers with quantized wrappers
     model = replace_layers(model,
                            block_size,
                            e_bits,
                            m_bits,
                            e_bits_scale,
                            m_bits_scale)
-    if use_HG:
-        print("Using HG")
+
+    # Calibration step
+    if use_Hessian:
+        print("Using Hessian block calibration")
+        model = calibrate_model_Hessian_block(model, data_loader, block_size, device)
+    elif use_HG:
+        print("Using HG calibration")
         model = calibrate_model_HG(model, data_loader, device)
     else:
+        print("Using standard calibration")
         model = calibrate_model(model, data_loader, device)
+
+    # Apply pruning masks (if any)
     apply_pruning_mask(model)
+
     return model
