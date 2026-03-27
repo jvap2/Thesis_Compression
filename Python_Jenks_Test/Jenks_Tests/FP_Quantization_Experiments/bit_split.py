@@ -81,6 +81,140 @@ def solve_exponent(W_abs_scaled, e_bits, mask):
     e = torch.clamp(e, 0, 2 ** e_bits - 1)
     return (e * mask).long()
 
+
+def compute_hessian_blocks(x, layer, block_size):
+    """
+    Returns block-diagonal Hessian approximation.
+
+    Output:
+        H_blocks: list of tensors per row
+                  each is [num_blocks, block_size, block_size]
+    """
+    if isinstance(layer, nn.Conv2d):
+        unfold = nn.Unfold(
+            kernel_size=layer.kernel_size,
+            dilation=layer.dilation,
+            padding=layer.padding,
+            stride=layer.stride
+        )
+        x = unfold(x)  # [B, C*k*k, L]
+        x = x.permute(0, 2, 1).reshape(-1, x.shape[1])  # [N, D]
+
+    elif isinstance(layer, nn.Linear):
+        x = x.reshape(-1, x.shape[-1])  # [N, D]
+
+    else:
+        return None
+
+    N, D = x.shape
+    H = x.T @ x  # [D, D]
+
+    # Split into blocks
+    H_blocks = []
+    for i in range(0, D, block_size):
+        end = min(i + block_size, D)
+        H_blocks.append(H[i:end, i:end])
+
+    return H_blocks
+
+def solve_alpha_blockwise_Hessian_blockdiag(W, basis, H_blocks, mask, block_size):
+    """
+    Block-diagonal Hessian solve.
+
+    W, basis, mask: [N, M]
+    H_blocks: list of [k, k]
+    """
+    N, M = W.shape
+    alpha = torch.zeros_like(W)
+
+    for row in range(N):
+        w_row = W[row]
+        b_row = basis[row]
+        m_row = mask[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            H = H_blocks[block_idx].to(W.device)
+
+            w_block = w_row[i:end]
+            b_block = b_row[i:end]
+            m_block = m_row[i:end]
+
+            # apply mask
+            w_block = w_block * m_block
+            b_block = b_block * m_block
+
+            # compute quadratic form
+            Hb = H @ b_block
+            Hw = H @ w_block
+
+            num = (b_block * Hw).sum()
+            den = (b_block * Hb).sum() + 1e-8
+
+            alpha_block = num / den
+
+            alpha[row, i:end] = alpha_block
+
+            block_idx += 1
+
+    return alpha
+
+def compute_hessian_blockdiag_model(model, data_loader, device, block_size, num_batches=10):
+    H_data = {}
+    hook_map = {}
+
+    def make_hook(name, inner_mod):
+        def hook(mod, inp, out):
+            x = inp[0].detach()
+
+            H_blocks = compute_hessian_blocks(x, inner_mod, block_size)
+
+            if H_blocks is None:
+                return
+
+            if name not in H_data:
+                H_data[name] = H_blocks
+            else:
+                # accumulate
+                for i in range(len(H_blocks)):
+                    H_data[name][i] += H_blocks[i]
+
+        return hook
+
+    handles = []
+
+    for name, module in model.named_modules():
+        if isinstance(module, QuantConv2dFP):
+            handles.append(module.register_forward_hook(make_hook(name, module.conv)))
+            hook_map[name] = module.conv
+
+        elif isinstance(module, QuantLinearFP):
+            handles.append(module.register_forward_hook(make_hook(name, module.linear)))
+            hook_map[name] = module.linear
+
+    model.eval()
+    with torch.no_grad():
+        for i, (x, _) in enumerate(data_loader):
+            x = x.to(device)
+            model(x)
+            if i + 1 >= num_batches:
+                break
+
+    for h in handles:
+        h.remove()
+
+    # normalize
+    H_final = {}
+    for name, blocks in H_data.items():
+        H_final[hook_map[name]] = [b / num_batches for b in blocks]
+
+    return H_final
+
+
+
 def conv_input_hessian_diag(x, conv):
     """
     Memory-efficient equivalent of unfold-based Hessian diag.
@@ -318,6 +452,55 @@ def reconstruct_layer_fp_Hessian(layer, H_diag_layer, block_size, e_bits, m_bits
         alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
 
     return alpha.view_as(W), e.view_as(W), m.view_as(W), sign.view_as(W)
+
+
+def reconstruct_layer_fp_blockdiag(
+    layer, 
+    H_blocks_layer,  # list of [block_size, block_size] Hessians
+    block_size, 
+    e_bits, 
+    m_bits, 
+    e_bits_scale, 
+    m_bits_scale, 
+    device
+):
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten conv layers
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    # --- magnitude/sign split ---
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    # --- initialize alpha ---
+    alpha = initialize_alpha(W_abs, mask_mat, block_size)
+
+    for _ in range(5):
+        # --- assign FP4 (exponent + mantissa) ---
+        e, m, basis = assign_fp4(W_abs, alpha, e_bits, m_bits)
+
+        # --- block-diagonal alpha update ---
+        alpha = solve_alpha_blockwise_Hessian_blockdiag(
+            W_abs, basis, H_blocks_layer, mask_mat, block_size
+        )
+
+        # --- quantize the scale ---
+        alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+
+    # reshape to original weight shape
+    alpha = alpha.view_as(W)
+    e = e.view_as(W)
+    m = m.view_as(W)
+    sign = sign.view_as(W)
+
+    return alpha, e, m, sign
 
 
 def initialize_alpha(W_abs, mask, block_size, eps=1e-6,
@@ -710,6 +893,21 @@ class QuantLinearFP(nn.Module):
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
+    def calibrate_Hessian_block(self, data_loader, device, H_block):
+        alpha, e, m ,sign = reconstruct_layer_fp_blockdiag(
+            self.linear,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device = device
+        )
+        bias = 2 ** (self.e_bits-1)-1
+        base = alpha * (2**(e.float()-bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine) * sign
 
 
     def forward(self, x):
@@ -762,7 +960,21 @@ class QuantConv2dFP(nn.Module):
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine).view_as(self.conv.weight) * sign.view_as(self.conv.weight)
-
+    def calibrate_Hessian_block(self, data_loader, device, H_block):
+        alpha, e, m, sign = reconstruct_layer_fp_blockdiag(
+            self.conv,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device=device
+        )
+        bias = 2 ** (self.e_bits - 1) - 1
+        base = alpha * (2.0 ** (e.float() - bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine).view_as(self.conv.weight) * sign.view_as(self.conv.weight)
     def forward(self, x):
         return F.conv2d(x,
                         self.weight_q if self.weight_q is not None else self.conv.weight,
@@ -814,7 +1026,7 @@ def calibrate_model(model, data_loader, device="cuda"):
 
 def calibrate_model_HG(model, data_loader, device="cuda"):
     model.eval().to(device)
-
+    H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device)
     H_dict = compute_hessian_diag_model(model, data_loader, device)
     print(H_dict)
     for keys in H_dict.keys():
