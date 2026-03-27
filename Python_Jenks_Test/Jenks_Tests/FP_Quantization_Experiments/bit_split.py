@@ -851,6 +851,198 @@ def reconstruct_layer_fp_HG(layer,
         m = m.view_as(W)
 
     return alpha, e, m
+
+# =========================================================
+# 🔹 NEW: GPTQ-STYLE ROW-WISE FP4 QUANTIZATION
+# =========================================================
+def reconstruct_layer_fp_rowwise_hessian(
+    layer,
+    H_diag_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    """
+    Row-wise GPTQ-style FP4 reconstruction using Hessian.
+    Args:
+        layer: nn.Module layer (Linear or Conv2d)
+        H_diag_layer: Hessian diag [N, M]
+        block_size: block size for alpha sharing
+        e_bits, m_bits: FP4 exponent/mantissa bits
+        e_bits_scale, m_bits_scale: scale quantization bits
+        device: device
+    Returns:
+        alpha, e, m, sign (all reshaped to layer weight shape)
+    """
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    if W.dim() == 4:  # Conv2d flatten
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+        H_mat = H_diag_layer.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+        H_mat = H_diag_layer
+
+    N, M = W_mat.shape
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    # Initialize alpha per block
+    alpha = initialize_alpha(W_abs, mask_mat, block_size, mode="percentile")
+    alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+
+    # --- Row-wise GPTQ-style loop ---
+    for row in range(N):
+        w_row = W_abs[row]
+        h_row = H_mat[row]
+        mask_row = mask_mat[row]
+        alpha_row = alpha[row]
+
+        # --- traverse blocks in the row ---
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            h_block = h_row[i:end]
+            m_block = mask_row[i:end]
+            a_block = alpha_row[i:end]
+
+            # --- Coarse pass: exponent ---
+            e_block, _, basis_block = assign_fp4(w_block, a_block, E_bits=e_bits, M_bits=0)
+
+            # --- Fine pass: mantissa ---
+            if m_bits > 0:
+                m_block_vals = solve_mantissa(w_block, a_block, e_block, e_bits, m_bits, m_block)
+            else:
+                m_block_vals = torch.zeros_like(w_block, dtype=torch.long)
+
+            # --- Compute basis for alpha update ---
+            basis_full = reconstruct_fp4(a_block, e_block, m_block_vals, torch.ones_like(w_block), e_bits, m_bits) / (a_block + 1e-8)
+
+            # --- Hessian-weighted alpha update ---
+            num = (h_block * w_block * basis_full * m_block).sum()
+            den = (h_block * (basis_full**2) * m_block).sum() + 1e-8
+            alpha_block_new = num / den
+            alpha_row[i:end] = alpha_block_new
+
+            # Quantize alpha to FP format
+            alpha_row[i:end] = quantize_scale(alpha_row[i:end], e_bits_scale, m_bits_scale)
+
+        # Save updated row
+        alpha[row] = alpha_row
+
+    # --- Final full-row assignment ---
+    e, m, _ = assign_fp4(W_abs, alpha, E_bits=e_bits, M_bits=m_bits)
+    return alpha.view_as(W), e.view_as(W), m.view_as(W), sign.view_as(W)
+
+
+import torch
+
+def reconstruct_block_fp4_pipeline(layer, H_diag_layer, block_size,
+                                   num_iters=3, e_bits=3, m_bits=3,
+                                   e_bits_scale=8, m_bits_scale=0,
+                                   device='cuda'):
+    """
+    Blockwise FP4 reconstruction (GPTQ-style) integrated into the current pipeline.
+
+    Args:
+        layer: nn.Module (Conv2d or Linear) with .weight
+        H_diag_layer: Hessian diagonal tensor of same shape as weight
+        block_size: number of weights per block
+        num_iters: alternating α + exponent updates
+        e_bits, m_bits: FP4 exponent/mantissa bits
+        e_bits_scale, m_bits_scale: FP quantization for α
+        device: computation device
+
+    Returns:
+        alpha: per-block scale
+        e: exponent tensor
+        m: mantissa tensor
+        sign: sign of weights
+    """
+
+    # --- Flatten weights and mask ---
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+    sign = torch.sign(W)
+    W_abs = W.abs()
+
+    if W.dim() == 4:  # Conv2d
+        W_flat = W_abs.view(W.shape[0], -1)
+        mask_flat = mask.view(W.shape[0], -1)
+        H_flat = H_diag_layer.view(W.shape[0], -1)
+    else:
+        W_flat = W_abs
+        mask_flat = mask
+        H_flat = H_diag_layer
+
+    N, M = W_flat.shape
+    alpha = torch.ones_like(W_flat, device=device)
+    e = torch.zeros_like(W_flat, dtype=torch.long, device=device)
+    m = torch.ones_like(W_flat, dtype=torch.long, device=device)
+
+    bias = 2 ** (e_bits - 1) - 1
+    m_max = 2**m_bits - 1
+
+    # --- Blockwise iteration ---
+    for row in range(N):
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+            w_block = W_flat[row, i:end]
+            h_block = H_flat[row, i:end]
+            mask_block = mask_flat[row, i:end]
+
+            if mask_block.sum() < 1e-8:
+                continue
+
+            # Initial exponent guess
+            e_block = torch.round(torch.log2(w_block.abs().max() + 1e-12)).long()
+            alpha_block = 1.0
+            m_block = torch.ones_like(w_block)
+
+            for it in range(num_iters):
+                # --- Step 1: Update α & mantissa for fixed exponent ---
+                scale = 2.0 ** (e_block - bias)
+                m_block = torch.clamp((w_block / scale).round(), 1, m_max)
+                numerator = (h_block * w_block * m_block * scale).sum()
+                denominator = (h_block * (m_block * scale)**2).sum() + 1e-12
+                alpha_block = numerator / denominator
+                alpha_block = torch.clamp(alpha_block, 1e-6, 1e6)  # optional FP clamp
+
+                # --- Step 2: Exponent search around e_block ---
+                best_err = float('inf')
+                best_e = e_block.clone()
+                for shift in range(-2, 3):  # small range search
+                    e_try = e_block + shift
+                    scale_try = 2.0 ** (e_try - bias)
+                    m_try = torch.clamp((w_block / scale_try).round(), 1, m_max)
+                    W_try = alpha_block * m_try * scale_try
+                    err = (h_block * (W_try - w_block)**2).sum()
+                    if err < best_err:
+                        best_err = err
+                        best_e = e_try
+                e_block = best_e
+
+            # --- Write final block ---
+            scale = 2.0 ** (e_block - bias)
+            m_block = torch.clamp((w_block / scale).round(), 1, m_max)
+            alpha[row, i:end] = alpha_block
+            e[row, i:end] = e_block
+            m[row, i:end] = m_block
+
+    # --- Reshape back to original weight shape ---
+    alpha = alpha.view_as(W)
+    e = e.view_as(W)
+    m = m.view_as(W)
+    sign = sign.view_as(W)
+
+    return alpha, e, m, sign
 # =========================================================
 # 🔹 QUANTIZED LINEAR
 # =========================================================
