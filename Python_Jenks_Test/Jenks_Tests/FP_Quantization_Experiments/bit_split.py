@@ -65,6 +65,119 @@ def solve_alpha_blockwise(W, W_tilde, mask, block_size):
 
     return alpha.view_as(W)
 
+
+def solve_alpha_blockwise_Hessian_correct(
+    W, basis, H_diag, mask, block_size, eps=1e-8
+):
+    """
+    Hessian-aware blockwise alpha solve (per-block scalar).
+
+    W, basis, H_diag, mask: [N, M]
+    Returns alpha: [N, M] where each block has a single scalar
+    """
+    N, M = W.shape
+    alpha = torch.zeros_like(W)
+
+    for row in range(N):
+        w_row = W[row]
+        b_row = basis[row]
+        h_row = H_diag[row]
+        m_row = mask[row]
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            b_block = b_row[i:end]
+            h_block = h_row[i:end]
+            m_block = m_row[i:end]
+
+            # apply mask
+            w_block = w_block * m_block
+            b_block = b_block * m_block
+            h_block = h_block * m_block
+
+            # normalize Hessian to avoid domination
+            mean_h = h_block.mean()
+            if mean_h < eps:
+                h_block = torch.ones_like(h_block)
+            else:
+                h_block = h_block / mean_h
+
+            # blockwise scalar alpha
+            num = (h_block * w_block * b_block).sum()
+            den = (h_block * b_block * b_block).sum() + eps
+            alpha_block = (num / den).clamp(min=eps)
+
+            # broadcast alpha to entire block
+            alpha[row, i:end] = alpha_block
+
+    return alpha
+
+
+def solve_alpha_blockwise_Hessian_full(
+    W, basis, H_blocks, mask, block_size, eps=1e-8
+):
+    """
+    Full block-diagonal Hessian solve (correct geometry).
+
+    W, basis, mask: [N, M]
+    H_blocks: list of [k, k]
+    """
+    N, M = W.shape
+    alpha = torch.zeros((N, M), device=W.device)
+
+    for row in range(N):
+        w_row = W[row]
+        b_row = basis[row]
+        m_row = mask[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            H = H_blocks[block_idx].to(W.device)
+
+            w_block = w_row[i:end]
+            b_block = b_row[i:end]
+            m_block = m_row[i:end]
+
+            # --- handle fully pruned block ---
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=W.device)
+                alpha[row, i:end] = alpha_block
+                block_idx += 1
+                continue
+
+            # --- apply mask (DO NOT drop indices) ---
+            w_block = w_block * m_block
+            b_block = b_block * m_block
+
+            # --- ensure H matches size ---
+            k = w_block.numel()
+            if H.shape[0] != k:
+                H = H[:k, :k]
+
+            # --- quadratic form ---
+            Hb = H @ b_block
+            Hw = H @ w_block
+
+            num = (b_block * Hw).sum()
+            den = (b_block * Hb).sum() + eps
+
+            alpha_block = num / den
+
+            # --- prevent collapse ---
+            alpha_block = torch.clamp(alpha_block, min=1e-6)
+
+            alpha[row, i:end] = alpha_block
+
+            block_idx += 1
+
+    return alpha
+
+
 # =========================================================
 # 🔹 EXPONENT (COARSE, mask-aware)
 # =========================================================
@@ -502,6 +615,29 @@ def reconstruct_layer_fp_blockdiag(
 
     return alpha, e, m, sign
 
+def initialize_alpha_safe(w_block, mask_block, k=None):
+    """
+    Initialize alpha scale for a block of weights.
+
+    Args:
+        w_block: 1D tensor of weights (already block-selected)
+        mask_block: same shape, 1s for active weights
+        k: optional, number of elements to use
+    Returns:
+        alpha: scalar or tensor per block
+    """
+    if k is None:
+        k = w_block.numel()
+
+    # Only consider nonzero entries
+    w_nz = w_block[mask_block > 0]
+
+    if w_nz.numel() == 0:
+        return torch.tensor(1.0, device=w_block.device)  # default alpha
+
+    # Simple L2 scale initialization (can replace with your preferred method)
+    alpha = torch.sqrt((w_nz ** 2).mean().clamp_min(1e-8))
+    return alpha
 
 def initialize_alpha(W_abs, mask, block_size, eps=1e-6,
                      e_bits=4, m_bits=3, mode="percentile"):
@@ -1043,6 +1179,424 @@ def reconstruct_block_fp4_pipeline(layer, H_diag_layer, block_size,
     sign = sign.view_as(W)
 
     return alpha, e, m, sign
+
+
+
+#=====================================================
+# Adaptive mesh method
+#=====================================================
+
+def hessian_block_whiten(w_block, H_block, eps=1e-6):
+    """
+    Transform w -> z = H^{1/2} w
+
+    Returns:
+        z_block
+        eigvecs
+        sqrt_L
+        inv_sqrt_L
+    """
+    # Eigendecomposition
+    eigvals, eigvecs = torch.linalg.eigh(H_block)
+
+    eigvals = torch.clamp(eigvals, min=eps)
+
+    sqrt_L = torch.sqrt(eigvals)
+    inv_sqrt_L = 1.0 / sqrt_L
+
+    # Transform
+    z_block = eigvecs.T @ w_block
+    z_block = z_block * sqrt_L
+
+    return z_block, eigvecs, sqrt_L, inv_sqrt_L
+
+def hessian_block_unwhiten(z_block, eigvecs, inv_sqrt_L):
+    """
+    Transform back: w = H^{-1/2} z
+    """
+    w_block = eigvecs @ (z_block * inv_sqrt_L)
+    return w_block
+
+
+def quantize_block_fp4_whitened(
+    w_block,
+    H_block,
+    fp4_quant_block_fn,
+    eps=1e-6
+):
+    """
+    Apply FP4 quantization in Hessian-whitened space.
+    """
+
+    # --- Step 1: whiten ---
+    z_block, eigvecs, sqrt_L, inv_sqrt_L = hessian_block_whiten(
+        w_block, H_block, eps
+    )
+
+    # --- Step 2: quantize in isotropic space ---
+    z_q = fp4_quant_block_fn(z_block)
+
+    # --- Step 3: map back ---
+    w_q = hessian_block_unwhiten(z_q, eigvecs, inv_sqrt_L)
+
+    return w_q
+
+
+
+def reconstruct_layer_fp_blockdiag_whitened(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+    W_q = torch.zeros_like(W_mat)
+
+    for row in range(N):
+        w_row = W_mat[row]
+        m_row = mask_mat[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            mask_block = m_row[i:end]
+
+            if mask_block.sum() < 1e-8:
+                continue
+
+            H_block = H_blocks_layer[block_idx].to(device)
+            ## Note the lines before the definition were added to deal with size mismatch
+            k = w_block.numel()
+
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # --- define FP4 quantizer using YOUR pipeline ---
+            def fp4_quant_block(z_block):
+                z_block = z_block.unsqueeze(0)  # match [1, k]
+
+                mask_local = torch.ones_like(z_block)
+
+                alpha = initialize_alpha(z_block.abs(), mask_local, z_block.shape[1])
+
+                for _ in range(3):
+                    e, m, basis = assign_fp4(z_block.abs(), alpha, e_bits, m_bits)
+                    alpha = solve_alpha_blockwise(z_block.abs(), basis, mask_local, z_block.shape[1])
+                    alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+
+                z_hat = alpha * basis
+                return z_hat.squeeze(0)
+
+            # --- apply whitening-based quantization ---
+            w_q_block = quantize_block_fp4_whitened(
+                w_block, H_block, fp4_quant_block
+            )
+
+            W_q[row, i:end] = w_q_block
+
+            block_idx += 1
+
+    # reshape back
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    alpha = initialize_alpha(W_abs, (W_q != 0).float(), block_size)
+    alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+    e, m, _ = assign_fp4(W_abs, alpha, e_bits, m_bits)
+
+    return alpha, e, m, sign
+
+
+
+def hessian_block_scale_diag(w_block, H_block, eps=1e-6, max_scale=10.0):
+    """
+    Diagonal Hessian scaling (stable, no rotation).
+    """
+    diag = torch.diag(H_block)
+    diag = torch.clamp(diag, min=eps)
+
+    scale = torch.sqrt(diag)
+
+    # Prevent explosion
+    scale = torch.clamp(scale, max=max_scale)
+
+    inv_scale = 1.0 / scale
+
+    z_block = w_block * scale
+
+    return z_block, scale, inv_scale
+
+
+def hessian_block_unscale_diag(z_block, inv_scale):
+    return z_block * inv_scale
+
+
+def quantize_block_fp4_scaled(
+    w_block,
+    H_block,
+    fp4_quant_block_fn,
+    eps=1e-6
+):
+    """
+    Diagonal Hessian-aware FP4 quantization (sign-preserving).
+    """
+
+    # --- scale ---
+    z_block, scale, inv_scale = hessian_block_scale_diag(
+        w_block, H_block, eps
+    )
+
+    # --- split sign ---
+    sign_z = torch.sign(z_block)
+    z_abs = z_block.abs()
+
+    # --- quantize magnitude ONLY ---
+    z_q_abs = fp4_quant_block_fn(z_abs)
+
+    # --- restore sign ---
+    z_q = sign_z * z_q_abs
+
+    # --- unscale ---
+    w_q = hessian_block_unscale_diag(z_q, inv_scale)
+
+    # 🔴 HARD sign constraint (critical)
+    w_q = torch.sign(w_block) * w_q.abs()
+
+    return w_q
+
+
+def reconstruct_layer_fp_blockdiag_scaled(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    """
+    Blockwise FP4 reconstruction with Hessian-aware alpha solve, preserving pruning mask.
+    
+    Args:
+        layer: nn.Linear or nn.Conv2d layer
+        H_blocks_layer: list of Hessian blocks for the layer
+        block_size: size of blocks along the flattened weight dimension
+        e_bits, m_bits: FP4 bits for exponent/mantissa
+        e_bits_scale, m_bits_scale: FP4 bits for alpha/scale
+        device: CUDA device
+    Returns:
+        alpha: blockwise scales (same shape as layer weights)
+        e, m: FP4 exponent/mantissa tensors (same shape as layer weights)
+        sign: signs of the quantized weights
+    """
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten weights and mask for blockwise processing
+    if W.dim() == 4:  # Conv2d
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:  # Linear
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+
+    # Allocate full tensors for results
+    W_q = torch.zeros_like(W_mat)
+    alpha_full = torch.zeros_like(W_mat)
+    e_full = torch.zeros_like(W_mat, dtype=torch.long)
+    m_full = torch.zeros_like(W_mat, dtype=torch.long)
+
+    for row in range(N):
+        w_row = W_mat[row]
+        m_row = mask_mat[row]
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+            w_block = w_row[i:end]
+            mask_block = m_row[i:end]
+
+            if mask_block.sum() < 1e-8:
+                continue  # skip fully pruned blocks
+
+            block_idx = i // block_size
+            H_block = H_blocks_layer[block_idx].to(device)
+
+            # Ensure H_block matches current block size
+            k = w_block.numel()
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # --- Process nonzero entries only ---
+            nz_mask = mask_block.bool()
+            w_nz = w_block[nz_mask]
+
+            # Initialize alpha for nonzeros
+            alpha_nz = initialize_alpha_safe(w_nz, torch.ones_like(w_nz), w_nz.numel())
+
+            # FP4 assignment
+            e_nz, m_nz, basis_nz = assign_fp4(w_nz, alpha_nz, e_bits, m_bits)
+
+            # Solve Hessian-aware alpha per block
+            alpha_nz = solve_alpha_blockwise_Hessian_correct(
+                w_nz.unsqueeze(0),              # shape 1 x k_nz
+                basis_nz.unsqueeze(0),          # 1 x k_nz
+                H_block,                        # block Hessian
+                nz_mask.unsqueeze(0).float(),   # 1 x k_nz
+                w_nz.numel()                     # block size
+            ).squeeze(0)
+
+            # Quantize alpha
+            alpha_nz = quantize_scale(alpha_nz, e_bits_scale, m_bits_scale)
+
+            # Reconstruct FP4 block
+            z_hat_nz = alpha_nz * basis_nz
+
+            # Scatter results back to full row
+            W_q[row, i:end][nz_mask] = z_hat_nz
+            alpha_full[row, i:end][nz_mask] = alpha_nz
+            e_full[row, i:end][nz_mask] = e_nz
+            m_full[row, i:end][nz_mask] = m_nz
+
+    # Recover sign
+    sign = torch.sign(W_q)
+
+    # Reshape to original layer shape
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+        alpha_full = alpha_full.view_as(W)
+        e_full = e_full.view_as(W)
+        m_full = m_full.view_as(W)
+        sign = sign.view_as(W)
+
+    return alpha_full, e_full, m_full, sign
+
+
+
+# def reconstruct_layer_fp_blockdiag_scaled(
+#     layer,
+#     H_blocks_layer,
+#     block_size,
+#     e_bits,
+#     m_bits,
+#     e_bits_scale,
+#     m_bits_scale,
+#     device
+# ):
+#     """
+#     Blockwise FP4 reconstruction with optional Hessian scaling.
+    
+#     Args:
+#         layer: nn.Module layer (Linear or Conv)
+#         H_blocks_layer: list of Hessian blocks per weight row
+#         block_size: block size for reconstruction
+#         e_bits, m_bits: FP4 bits for exponent and mantissa
+#         e_bits_scale, m_bits_scale: FP4 bits for alpha scale
+#         device: torch device
+#     Returns:
+#         alpha: per-block scales
+#         e: FP4 exponent tensor
+#         m: FP4 mantissa tensor
+#         sign: sign of reconstructed weights
+#     """
+
+#     W = layer.weight.data.to(device)
+#     mask = (W != 0).float()
+
+#     # Flatten convolution weights
+#     if W.dim() == 4:
+#         W_mat = W.view(W.shape[0], -1)
+#         mask_mat = mask.view(W.shape[0], -1)
+#     else:
+#         W_mat = W
+#         mask_mat = mask
+
+#     N, M = W_mat.shape
+#     W_q = torch.zeros_like(W_mat)
+
+#     # Loop over rows
+#     for row in range(N):
+#         w_row = W_mat[row]
+#         m_row = mask_mat[row]
+
+#         for i in range(0, M, block_size):
+#             end = min(i + block_size, M)
+#             w_block = w_row[i:end]
+#             mask_block = m_row[i:end]
+
+#             if mask_block.sum() < 1e-8:
+#                 continue
+
+#             block_idx = i // block_size
+#             H_block = H_blocks_layer[block_idx].to(device)
+#             k_block = w_block.numel()
+
+#             # Ensure H_block matches block size
+#             if H_block.shape[0] != k_block:
+#                 H_block = H_block[:k_block, :k_block]
+
+#             # --- FP4 block reconstruction ---
+#             def fp4_quant_block(z_block):
+#                 """
+#                 z_block: 1D tensor for this block
+#                 Returns reconstructed FP4 block
+#                 """
+#                 mask_local = (z_block != 0).float()
+#                 k_local = z_block.numel()
+
+#                 # initialize alpha on full block
+#                 alpha = initialize_alpha(z_block, mask_local, k_local)
+
+#                 for _ in range(3):
+#                     e, m, basis = assign_fp4(z_block.unsqueeze(0), alpha, e_bits, m_bits)
+#                     basis = basis.squeeze(0)
+#                     alpha = solve_alpha_blockwise_Hessian_correct(
+#                         z_block, basis, H_block[:k_local, :k_local], mask_local, k_local
+#                     )
+#                     alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+
+#                 return alpha * basis
+
+#             # Quantize block
+#             w_q_block = fp4_quant_block(w_block)
+#             W_q[row, i:end] = w_q_block
+
+#     # Reshape back to original shape
+#     if W.dim() == 4:
+#         W_q = W_q.view_as(W)
+
+#     sign = torch.sign(W_q)
+#     W_abs = W_q.abs()
+
+#     # Recover FP4 components (optional, for logging/consistency)
+#     alpha = initialize_alpha(W_abs, (W_q != 0).float(), block_size)
+#     alpha = quantize_scale(alpha, e_bits_scale, m_bits_scale)
+#     e, m, _ = assign_fp4(W_abs, alpha, e_bits, m_bits)
+
+#     return alpha, e, m, sign
 # =========================================================
 # 🔹 QUANTIZED LINEAR
 # =========================================================
@@ -1098,6 +1652,38 @@ class QuantLinearFP(nn.Module):
         )
         bias = 2 ** (self.e_bits-1)-1
         base = alpha * (2**(e.float()-bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine) * sign
+    def calibrate_Hessian_whitened(self, data_loader, device, H_block):
+        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_whitened(
+            self.linear,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device=device
+        )
+
+        bias = 2 ** (self.e_bits - 1) - 1
+        base = alpha * (2.0 ** (e.float() - bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine) * sign
+    def calibrate_Hessian_scaled(self, data_loader, device, H_block):
+        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+            self.linear,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device=device
+        )
+
+        bias = 2 ** (self.e_bits - 1) - 1
+        base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
 
@@ -1167,6 +1753,38 @@ class QuantConv2dFP(nn.Module):
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine).view_as(self.conv.weight) * sign.view_as(self.conv.weight)
+    def calibrate_Hessian_whitened(self, data_loader, device, H_block):
+        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_whitened(
+            self.conv,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device=device
+        )
+
+        bias = 2 ** (self.e_bits - 1) - 1
+        base = alpha * (2.0 ** (e.float() - bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine) * sign
+    def calibrate_Hessian_scaled(self, data_loader, device, H_block):
+        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+            self.conv,
+            H_block,
+            self.block_size,
+            self.e_bits,
+            self.m_bits,
+            self.e_bits_scale,
+            self.m_bits_scale,
+            device=device
+        )
+
+        bias = 2 ** (self.e_bits - 1) - 1
+        base = alpha * (2.0 ** (e.float() - bias))
+        fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
+        self.weight_q = (base + fine) * sign
     def forward(self, x):
         return F.conv2d(x,
                         self.weight_q if self.weight_q is not None else self.conv.weight,
@@ -1216,6 +1834,29 @@ def calibrate_model(model, data_loader, device="cuda"):
             module.calibrate(data_loader, device)
     return model
 
+
+def calibrate_model_Hessian_scaled(model, data_loader, block_size, device):
+    model.eval().to(device)
+
+    H_dict_block = compute_hessian_blockdiag_model(
+        model, data_loader, device, block_size
+    )
+
+    for module in model.modules():
+        if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
+
+            if hasattr(module, "linear") and module.linear in H_dict_block:
+                H_block = H_dict_block[module.linear]
+            elif hasattr(module, "conv") and module.conv in H_dict_block:
+                H_block = H_dict_block[module.conv]
+            else:
+                continue
+
+            module.calibrate_Hessian_scaled(data_loader, device, H_block)
+
+    return model
+
+
 def calibrate_model_HG(model, data_loader, device="cuda"):
     model.eval().to(device)
     # H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device)
@@ -1241,6 +1882,7 @@ def calibrate_model_HG(model, data_loader, device="cuda"):
 def calibrate_model_Hessian_block(model, data_loader, block_size, device):
     model.eval().to(device)
     H_dict_block = compute_hessian_blockdiag_model(model, data_loader, device, block_size)
+    # H_dict_block = compute_hessian_diag_model(model, data_loader, device)
     for module in model.modules():
         if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
             # Determine the underlying weight module
@@ -1255,6 +1897,29 @@ def calibrate_model_Hessian_block(model, data_loader, block_size, device):
             module.calibrate_Hessian_block(data_loader, device, H_diag)
 
     return model
+
+
+def calibrate_model_Hessian_whitened(model, data_loader, block_size, device):
+    model.eval().to(device)
+
+    H_dict_block = compute_hessian_blockdiag_model(
+        model, data_loader, device, block_size
+    )
+
+    for module in model.modules():
+        if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
+
+            if hasattr(module, "linear") and module.linear in H_dict_block:
+                H_block = H_dict_block[module.linear]
+            elif hasattr(module, "conv") and module.conv in H_dict_block:
+                H_block = H_dict_block[module.conv]
+            else:
+                continue
+
+            module.calibrate_Hessian_whitened(data_loader, device, H_block)
+
+    return model
+
 def fold_bn_into_conv(conv, bn):
     """
     Fold BatchNorm into Conv2d
@@ -1325,7 +1990,8 @@ def quantize_model_fp(model,
                       m_bits_scale=0,
                       device="cuda",
                       use_HG=True,
-                      use_Hessian=False):
+                      use_Hessian=False,
+                      use_adap=False):
     """
     Quantize a model to FP4-like format with optional HG or Hessian calibration.
     """
@@ -1351,6 +2017,9 @@ def quantize_model_fp(model,
     elif use_HG:
         print("Using HG calibration")
         model = calibrate_model_HG(model, data_loader, device)
+    elif use_adap:
+        print("Using adaptive mesh calibration")
+        model = calibrate_model_Hessian_scaled(model, data_loader, block_size, device)
     else:
         print("Using standard calibration")
         model = calibrate_model(model, data_loader, device)

@@ -17,7 +17,7 @@ geometry = True
 batch_size = 512
 bitwidth = 4
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-net = networks[3]
+net = networks[2]
 data = data[1]
 precision_config = {
     "first": (4, 3),
@@ -435,7 +435,7 @@ evaluate(reg_model, val_dataloader, device)
 # quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 import copy
 # model_to_quantize = copy.deepcopy(reg_model)
-quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=128,e_bits=2,m_bits=1,e_bits_scale=4,m_bits_scale=3, device = device, use_HG=False, use_Hessian=True)
+quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=128,e_bits=2,m_bits=1,e_bits_scale=4,m_bits_scale=3, device = device, use_HG=False, use_Hessian=False, use_adap=True)
 # quant_model = quantize_net_fixed(model_to_quantize,val_dataloader,block_size=64, mbits_weight=1, ebits_weight=2, mbits_scale=3, ebits_scale=4)
 
 # quant_model = recalibrate_batchnorm(quant_model, train_dataloader, device=device, num_batches=50)
