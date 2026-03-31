@@ -1397,102 +1397,128 @@ def reconstruct_layer_fp_blockdiag_scaled(
     device
 ):
     """
-    Blockwise FP4 reconstruction with Hessian-aware alpha solve, preserving pruning mask.
-    
-    Args:
-        layer: nn.Linear or nn.Conv2d layer
-        H_blocks_layer: list of Hessian blocks for the layer
-        block_size: size of blocks along the flattened weight dimension
-        e_bits, m_bits: FP4 bits for exponent/mantissa
-        e_bits_scale, m_bits_scale: FP4 bits for alpha/scale
-        device: CUDA device
+    Blockwise FP4 reconstruction with correct Hessian-aware alpha solve.
+
+    Key properties:
+    - Full block geometry (no nz compression)
+    - Mask applied multiplicatively (not structurally)
+    - Blockwise scalar alpha
+    - 2-step fixed-point refinement
+    - No destructive post-recompute
+
     Returns:
-        alpha: blockwise scales (same shape as layer weights)
-        e, m: FP4 exponent/mantissa tensors (same shape as layer weights)
-        sign: signs of the quantized weights
+        alpha, e, m, sign (same shape as weights)
     """
+
     W = layer.weight.data.to(device)
     mask = (W != 0).float()
 
-    # Flatten weights and mask for blockwise processing
-    if W.dim() == 4:  # Conv2d
+    # Flatten
+    if W.dim() == 4:
         W_mat = W.view(W.shape[0], -1)
         mask_mat = mask.view(W.shape[0], -1)
-    else:  # Linear
+    else:
         W_mat = W
         mask_mat = mask
 
     N, M = W_mat.shape
 
-    # Allocate full tensors for results
-    W_q = torch.zeros_like(W_mat)
-    alpha_full = torch.zeros_like(W_mat)
-    e_full = torch.zeros_like(W_mat, dtype=torch.long)
-    m_full = torch.zeros_like(W_mat, dtype=torch.long)
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
 
+    # Outputs
+    W_q = torch.zeros_like(W_mat)
+    alpha_out = torch.zeros_like(W_mat)
+
+    # --- Blockwise reconstruction ---
     for row in range(N):
-        w_row = W_mat[row]
+        w_row = W_abs[row]
         m_row = mask_mat[row]
+
+        block_idx = 0
 
         for i in range(0, M, block_size):
             end = min(i + block_size, M)
+
             w_block = w_row[i:end]
-            mask_block = m_row[i:end]
+            m_block = m_row[i:end]
 
-            if mask_block.sum() < 1e-8:
-                continue  # skip fully pruned blocks
-
-            block_idx = i // block_size
             H_block = H_blocks_layer[block_idx].to(device)
 
-            # Ensure H_block matches current block size
             k = w_block.numel()
             if H_block.shape[0] != k:
                 H_block = H_block[:k, :k]
 
-            # --- Process nonzero entries only ---
-            nz_mask = mask_block.bool()
-            w_nz = w_block[nz_mask]
+            # --- fully pruned block ---
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=device)
+                basis_block = torch.zeros_like(w_block)
 
-            # Initialize alpha for nonzeros
-            alpha_nz = initialize_alpha_safe(w_nz, torch.ones_like(w_nz), w_nz.numel())
+                W_q[row, i:end] = 0.0
+                alpha_out[row, i:end] = alpha_block
 
-            # FP4 assignment
-            e_nz, m_nz, basis_nz = assign_fp4(w_nz, alpha_nz, e_bits, m_bits)
+                block_idx += 1
+                continue
 
-            # Solve Hessian-aware alpha per block
-            alpha_nz = solve_alpha_blockwise_Hessian_correct(
-                w_nz.unsqueeze(0),              # shape 1 x k_nz
-                basis_nz.unsqueeze(0),          # 1 x k_nz
-                H_block,                        # block Hessian
-                nz_mask.unsqueeze(0).float(),   # 1 x k_nz
-                w_nz.numel()                     # block size
-            ).squeeze(0)
+            # --- initialize alpha (robust scale) ---
+            alpha_block = torch.sqrt((w_block[m_block > 0] ** 2).mean())
+            alpha_block = torch.clamp(alpha_block, min=1e-4)
 
-            # Quantize alpha
-            alpha_nz = quantize_scale(alpha_nz, e_bits_scale, m_bits_scale)
+            # --- fixed-point refinement (critical) ---
+            for _ in range(2):
+                # assign FP4
+                e_block, m_block_vals, basis_block = assign_fp4(
+                    w_block, alpha_block, e_bits, m_bits
+                )
 
-            # Reconstruct FP4 block
-            z_hat_nz = alpha_nz * basis_nz
+                # apply mask (preserve geometry)
+                w_eff = w_block * m_block
+                b_eff = basis_block * m_block
 
-            # Scatter results back to full row
-            W_q[row, i:end][nz_mask] = z_hat_nz
-            alpha_full[row, i:end][nz_mask] = alpha_nz
-            e_full[row, i:end][nz_mask] = e_nz
-            m_full[row, i:end][nz_mask] = m_nz
+                # quadratic solve: alpha = (b^T H w) / (b^T H b)
+                Hb = H_block @ b_eff
+                Hw = H_block @ w_eff
 
-    # Recover sign
-    sign = torch.sign(W_q)
+                num = (b_eff * Hw).sum()
+                den = (b_eff * Hb).sum() + 1e-8
 
-    # Reshape to original layer shape
+                alpha_block = num / den
+
+                # prevent collapse
+                alpha_block = torch.clamp(alpha_block, min=1e-6)
+
+                # quantize scale
+                alpha_block = quantize_scale(
+                    alpha_block, e_bits_scale, m_bits_scale
+                )
+
+            # --- final quantization ---
+            e_block, m_block_vals, basis_block = assign_fp4(
+                w_block, alpha_block, e_bits, m_bits
+            )
+
+            w_hat = alpha_block * basis_block
+
+            # restore sign
+            w_hat = w_hat * sign[row, i:end]
+
+            W_q[row, i:end] = w_hat
+            alpha_out[row, i:end] = alpha_block
+
+            block_idx += 1
+
+    # reshape back
     if W.dim() == 4:
         W_q = W_q.view_as(W)
-        alpha_full = alpha_full.view_as(W)
-        e_full = e_full.view_as(W)
-        m_full = m_full.view_as(W)
-        sign = sign.view_as(W)
+        alpha_out = alpha_out.view_as(W)
 
-    return alpha_full, e_full, m_full, sign
+    # final FP decomposition (for storage)
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    e, m, _ = assign_fp4(W_abs, alpha_out, e_bits, m_bits)
+
+    return alpha_out, e.view_as(W), m.view_as(W), sign.view_as(W)
 
 
 
