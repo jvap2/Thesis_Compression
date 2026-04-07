@@ -76,3 +76,46 @@ def solve_output_scale_channelwise(block_fp, block_q, inputs, m, n_grid=20):
 
         m.theta.data = best_log_s
 
+def hadamard_transform(x):
+    """
+    In-place Fast Walsh-Hadamard Transform
+    x: (k,) tensor, k must be power of 2
+    """
+    n = x.shape[0]
+    h = 1
+    y = x.clone()
+
+    while h < n:
+        for i in range(0, n, h * 2):
+            a = y[i:i+h]
+            b = y[i+h:i+2*h]
+            y[i:i+h] = a + b
+            y[i+h:i+2*h] = a - b
+        h *= 2
+
+    return y / torch.sqrt(torch.tensor(n, device=x.device))
+
+def hadamard_safe(x):
+    k = x.numel()
+    next_pow2 = 1 << (k - 1).bit_length()
+
+    if next_pow2 == k:
+        return hadamard_transform(x), None
+
+    # pad
+    pad = next_pow2 - k
+    x_pad = torch.cat([x, torch.zeros(pad, device=x.device)])
+
+    y = hadamard_transform(x_pad)
+    return y[:k], pad
+
+def hadamard_inverse(x, pad):
+    k = x.numel()
+
+    if pad is None:
+        return hadamard_transform(x)
+
+    next_pow2 = k + pad
+    x_pad = torch.cat([x, torch.zeros(pad, device=x.device)])
+    y = hadamard_transform(x_pad)
+    return y[:k]

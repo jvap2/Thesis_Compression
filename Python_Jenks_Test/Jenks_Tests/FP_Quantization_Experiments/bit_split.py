@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .utils import *
 
 
 def get_block_size(layer, default_block_size, override_conv=True):
@@ -275,7 +276,7 @@ def solve_alpha_blockwise_Hessian_blockdiag(W, basis, H_blocks, mask, block_size
 
     return alpha
 
-def compute_hessian_blockdiag_model(model, data_loader, device, block_size, num_batches=10):
+def compute_hessian_blockdiag_model(model, data_loader, device, block_size, num_batches=50):
     H_data = {}
     hook_map = {}
 
@@ -447,7 +448,7 @@ def conv_input_hessian_diag(x, conv):
 #     print(f"Collected Hessians for {len(H_diag_dict)} modules")
 #     return H_diag_dict
 
-def compute_hessian_diag_model(model, data_loader, device, num_batches=10):
+def compute_hessian_diag_model(model, data_loader, device, num_batches=50):
     H_data = {}
     hook_name_to_submodule = {}
 
@@ -730,6 +731,46 @@ def assign_fp4(W_abs, alpha, E_bits=2, M_bits=1):
 
     # ----- Reconstruct basis -----
     base_selected = 0.5 * (2.0 ** exponent)
+    basis = base_selected * (1.0 + mantissa / (2**M_bits))
+
+    return exponent, mantissa, basis
+
+
+
+
+def assign_fp4_dynamic(W_abs, alpha, E_bits=2, M_bits=1, bias=None):
+    """
+    Bit-accurate FP assignment with configurable exponent bias.
+    """
+
+    x = W_abs / alpha.clamp_min(1e-8)
+    device = W_abs.device
+
+    if bias is None:
+        bias = 2**(E_bits - 1) - 1
+
+    # Exponent + mantissa grids
+    e_levels = torch.arange(0, 2**E_bits, device=device)
+    m_levels = torch.arange(0, 2**M_bits, device=device)
+
+    # Correct base using SAME bias everywhere
+    base = 2.0 ** (e_levels - bias)
+    mantissa_factor = 1.0 + (m_levels / (2**M_bits))
+
+    codebook = (base.unsqueeze(1) * mantissa_factor.unsqueeze(0)).view(-1)
+
+    # Assign nearest
+    x_expanded = x.unsqueeze(-1)
+    codebook_expanded = codebook.view(*([1]*x.dim()), -1)
+
+    dist = (x_expanded - codebook_expanded).abs()
+    indices = dist.argmin(dim=-1)
+
+    M = 2**M_bits
+    exponent = indices // M
+    mantissa = indices % M
+
+    base_selected = 2.0 ** (exponent - bias)
     basis = base_selected * (1.0 + mantissa / (2**M_bits))
 
     return exponent, mantissa, basis
@@ -1520,8 +1561,764 @@ def reconstruct_layer_fp_blockdiag_scaled(
 
     return alpha_out, e.view_as(W), m.view_as(W), sign.view_as(W)
 
+def reconstruct_layer_fp_blockdiag_scaled_v2(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    """
+    Activation-aware FP4 reconstruction (fixed version).
+
+    Fixes:
+    - No masking inside optimization
+    - Proper Hessian quadratic solve
+    - Delayed alpha quantization
+    - Collapse prevention
+    """
+
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    # Outputs
+    W_q = torch.zeros_like(W_mat)
+    alpha_out = torch.zeros_like(W_mat)
+
+    # --- Blockwise reconstruction ---
+    for row in range(N):
+        w_row = W_abs[row]
+        m_row = mask_mat[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            m_block = m_row[i:end]
+
+            H_block = H_blocks_layer[block_idx].to(device)
+
+            k = w_block.numel()
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # --- fully pruned block ---
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=device)
+
+                W_q[row, i:end] = 0.0
+                alpha_out[row, i:end] = alpha_block
+
+                block_idx += 1
+                continue
+
+            # --- initialize alpha (robust RMS) ---
+            alpha_block = torch.sqrt((w_block ** 2).mean())
+            alpha_block = torch.clamp(alpha_block, min=1e-4)
+
+            # --- fixed-point refinement ---
+            for _ in range(2):
+                # FP4 assignment
+                e_block, m_block_vals, basis_block = assign_fp4(
+                    w_block, alpha_block, e_bits, m_bits
+                )
+
+                # 🚨 NO MASK HERE
+                b = basis_block
+                w = w_block
+
+                # Hessian solve
+                Hb = H_block @ b
+                Hw = H_block @ w
+
+                num = (b * Hw).sum()
+                den = (b * Hb).sum() + 1e-8
+
+                alpha_new = num / den
+
+                # --- stabilization ---
+                # prevent collapse relative to block energy
+                alpha_min = 0.05 * w_block.abs().mean()
+                alpha_block = torch.clamp(alpha_new, min=alpha_min)
+
+            # --- quantize alpha AFTER convergence ---
+            alpha_block = quantize_scale(
+                alpha_block, e_bits_scale, m_bits_scale
+            )
+
+            # --- final quantization ---
+            e_block, m_block_vals, basis_block = assign_fp4(
+                w_block, alpha_block, e_bits, m_bits
+            )
+
+            w_hat = alpha_block * basis_block
+
+            # ✅ APPLY MASK ONLY HERE
+            w_hat = w_hat * m_block
+
+            # restore sign
+            w_hat = w_hat * sign[row, i:end]
+
+            W_q[row, i:end] = w_hat
+            alpha_out[row, i:end] = alpha_block
+
+            block_idx += 1
+
+    # reshape back
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+        alpha_out = alpha_out.view_as(W)
+
+    # final FP decomposition
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    e, m, _ = assign_fp4(W_abs, alpha_out, e_bits, m_bits)
+
+    return alpha_out, e.view_as(W), m.view_as(W), sign.view_as(W)
 
 
+def reconstruct_layer_fp_blockdiag_scaled_v3(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    W_q = torch.zeros_like(W_mat)
+    alpha_out = torch.zeros_like(W_mat)
+
+    for row in range(N):
+        w_row = W_abs[row]
+        m_row = mask_mat[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            m_block = m_row[i:end]
+
+            H_block = H_blocks_layer[block_idx].to(device)
+
+            k = w_block.numel()
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # --- fully pruned ---
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=device)
+                W_q[row, i:end] = 0.0
+                alpha_out[row, i:end] = alpha_block
+                block_idx += 1
+                continue
+
+            # --- init alpha ---
+            alpha_block = torch.sqrt((w_block ** 2).mean())
+            alpha_block = torch.clamp(alpha_block, min=1e-4)
+
+            # --- fixed-point refinement ---
+            for _ in range(3):
+
+                _, _, b = assign_fp4(w_block, alpha_block, e_bits, m_bits)
+
+                # apply mask ONLY to weights (not structure)
+                w_eff = w_block * m_block
+                b_eff = b * m_block
+
+                # --- CORRECT quadratic form ---
+                Hb = H_block @ b_eff
+                Hw = H_block @ w_eff
+
+                num = torch.dot(b_eff, Hw)
+                den = torch.dot(b_eff, Hb) + 1e-8
+
+                alpha_new = num / den
+
+                # stabilization (CRITICAL)
+                alpha_min = 0.1 * w_block.abs().mean()
+                alpha_max = 10.0 * w_block.abs().mean()
+
+                alpha_block = torch.clamp(alpha_new, min=alpha_min, max=alpha_max)
+
+            # quantize AFTER convergence
+            alpha_block = quantize_scale(alpha_block, e_bits_scale, m_bits_scale)
+
+            # final projection
+            _, _, b = assign_fp4(w_block, alpha_block, e_bits, m_bits)
+            w_hat = alpha_block * b
+
+            # apply mask at end
+            w_hat = w_hat * m_block
+            w_hat = w_hat * sign[row, i:end]
+
+            W_q[row, i:end] = w_hat
+            alpha_out[row, i:end] = alpha_block
+
+            block_idx += 1
+
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+        alpha_out = alpha_out.view_as(W)
+
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    e, m, _ = assign_fp4(W_abs, alpha_out, e_bits, m_bits)
+
+    return alpha_out, e.view_as(W), m.view_as(W), sign.view_as(W)
+
+
+
+
+
+def reconstruct_layer_fp_blockdiag_scaled_v4(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device
+):
+    """
+    FINAL VERSION — Consistent adaptive-mesh FP4 reconstruction
+
+    Features:
+    - Hessian-aware alpha optimization
+    - Per-block exponent bias search
+    - Alpha per block (shared)
+    - Bias per block (shared)
+    - NO re-quantization mismatch
+    - Stable optimization
+
+    Returns:
+        alpha_out, e, m, sign, bias_out
+    """
+
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    # Flatten
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    # Outputs
+    W_q = torch.zeros_like(W_mat)
+    alpha_out = torch.zeros_like(W_mat)
+    bias_out = torch.zeros_like(W_mat)
+
+    for row in range(N):
+        w_row = W_abs[row]
+        m_row = mask_mat[row]
+
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            w_block = w_row[i:end]
+            m_block = m_row[i:end]
+
+            H_block = H_blocks_layer[block_idx].to(device)
+
+            k = w_block.numel()
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # =========================
+            # Fully pruned block
+            # =========================
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=device)
+                bias_block = 0
+
+                W_q[row, i:end] = 0.0
+                alpha_out[row, i:end] = alpha_block
+                bias_out[row, i:end] = bias_block
+
+                block_idx += 1
+                continue
+
+            # =========================
+            # Initialization
+            # =========================
+            w_eff = w_block * m_block
+
+            alpha_init = torch.sqrt((w_eff ** 2).mean()).clamp(min=1e-4)
+
+            default_bias = 2**(e_bits - 1) - 1
+            bias_radius = max(1, 2**(e_bits - 2))  # adaptive search window
+
+            best_loss = float('inf')
+            best_alpha = None
+            best_bias = None
+            best_b = None
+
+            # =========================
+            # Bias search loop
+            # =========================
+
+            Hw = H_block @ w_eff
+            for bias_candidate in range(default_bias - bias_radius,
+                                        default_bias + bias_radius + 1):
+
+                alpha_tmp = alpha_init.clone()
+
+                # Fixed-point refinement
+                for _ in range(5):
+                    _, _, b = assign_fp4_dynamic(
+                        w_block,
+                        alpha_tmp,
+                        e_bits,
+                        m_bits,
+                        bias=bias_candidate
+                    )
+
+
+                    b_eff = b * m_block
+
+                    Hb = H_block @ b_eff
+                    num = torch.dot(b_eff, Hw)
+                    den = torch.dot(b_eff, Hb) + 1e-8
+
+                    alpha_new = num / den
+
+                    # Stabilization
+                    alpha_min = 0.05 * w_eff.abs().mean()
+                    alpha_max = 20.0 * w_eff.abs().mean()
+
+                    alpha_tmp = torch.clamp(alpha_new, min=alpha_min, max=alpha_max)
+
+                # Evaluate quadratic loss
+                residual = w_eff - alpha_tmp * b_eff
+                loss = torch.dot(residual, H_block @ residual)
+
+                if loss < best_loss:
+                    best_loss = loss
+                    best_alpha = alpha_tmp
+                    best_bias = bias_candidate
+                    best_b = b
+
+            # =========================
+            # Final alpha quantization
+            # =========================
+            alpha_block = quantize_scale(
+                best_alpha, e_bits_scale, m_bits_scale
+            )
+
+            # =========================
+            # Final basis recompute
+            # =========================
+            _, _, b_final = assign_fp4_dynamic(
+                w_block,
+                alpha_block,
+                e_bits,
+                m_bits,
+                bias=best_bias
+            )
+
+            w_hat = alpha_block * b_final
+
+            # Apply mask + sign
+            w_hat = w_hat * m_block
+            w_hat = w_hat * sign[row, i:end]
+
+            # Store
+            W_q[row, i:end] = w_hat
+            alpha_out[row, i:end] = alpha_block
+            bias_out[row, i:end] = best_bias
+
+            block_idx += 1
+
+    # =========================
+    # Reshape back
+    # =========================
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+        alpha_out = alpha_out.view_as(W)
+        bias_out = bias_out.view_as(W)
+
+    # =========================
+    # Final FP decomposition (CONSISTENT)
+    # =========================
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    if W.dim() == 4:
+        W_mat = W_abs.view(W.shape[0], -1)
+        alpha_mat = alpha_out.view(W.shape[0], -1)
+        bias_mat = bias_out.view(W.shape[0], -1)
+    else:
+        W_mat = W_abs
+        alpha_mat = alpha_out
+        bias_mat = bias_out
+
+    e = torch.zeros_like(W_mat)
+    m = torch.zeros_like(W_mat)
+
+    for row in range(N):
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+
+            bias_block = int(bias_mat[row, i].item())
+            alpha_block = alpha_mat[row, i]
+
+            w_block = W_mat[row, i:end]
+
+            e_block, m_block, _ = assign_fp4_dynamic(
+                w_block,
+                alpha_block,
+                e_bits,
+                m_bits,
+                bias=bias_block
+            )
+
+            e[row, i:end] = e_block
+            m[row, i:end] = m_block
+
+    if W.dim() == 4:
+        e = e.view_as(W)
+        m = m.view_as(W)
+
+    return alpha_out, e, m, sign, bias_out
+
+
+
+
+def reconstruct_layer_fp_blockdiag_scaled_v4_forward(
+    layer,
+    H_blocks_layer,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device,
+    cached_input=None,
+    use_forward=False,
+    top_k=2
+):
+    """
+    FINAL VERSION — Stable adaptive-mesh FP4 reconstruction
+
+    Args:
+        layer: nn.Linear or nn.Conv2d
+        H_blocks_layer: list of Hessian blocks (per weight block)
+        block_size: block size for FP4 reconstruction
+        e_bits, m_bits: number of bits for exponent/mantissa
+        e_bits_scale, m_bits_scale: number of bits for alpha quantization
+        device: torch.device
+        cached_input: optional input for forward-pass selection
+        use_forward: if True, compute loss using forward pass
+        top_k: number of candidates for Hessian selection
+
+    Returns:
+        alpha_out, e, m, sign, bias_out
+    """
+
+    W = layer.weight.data.to(device)
+    mask = (W != 0).float()
+
+    if W.dim() == 4:
+        W_mat = W.view(W.shape[0], -1)
+        mask_mat = mask.view(W.shape[0], -1)
+    else:
+        W_mat = W
+        mask_mat = mask
+
+    N, M = W_mat.shape
+    sign = torch.sign(W_mat)
+    W_abs = W_mat.abs()
+
+    W_q = torch.zeros_like(W_mat)
+    alpha_out = torch.zeros_like(W_mat)
+    bias_out = torch.zeros_like(W_mat)
+
+    # Optional precompute FP output
+    if use_forward and cached_input is not None:
+        with torch.no_grad():
+            if W.dim() == 2:
+                y_fp = F.linear(cached_input, W)
+            else:
+                y_fp = F.conv2d(
+                    cached_input,
+                    W,
+                    layer.bias,
+                    stride=layer.stride,
+                    padding=layer.padding
+                )
+
+    for row in range(N):
+        w_row = W_abs[row]
+        m_row = mask_mat[row]
+        block_idx = 0
+
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+            w_block = w_row[i:end]
+            m_block = m_row[i:end]
+
+            H_block = H_blocks_layer[block_idx].to(device)
+            k = w_block.numel()
+            if H_block.shape[0] != k:
+                H_block = H_block[:k, :k]
+
+            # Fully pruned block
+            if m_block.sum() < 1e-8:
+                alpha_block = torch.tensor(1.0, device=device)
+                bias_block = 0
+                W_q[row, i:end] = 0.0
+                alpha_out[row, i:end] = alpha_block
+                bias_out[row, i:end] = bias_block
+                block_idx += 1
+                continue
+
+            # Effective weights
+            w_eff = w_block * m_block
+            alpha_init = torch.sqrt((w_eff ** 2).mean()).clamp(min=1e-4)
+
+            default_bias = 2**(e_bits - 1) - 1
+            bias_radius = max(1, 2**(e_bits - 2))  # adaptive search window
+
+            best_loss = float('inf')
+            best_alpha = None
+            best_bias = None
+            best_b = None
+
+            Hw = H_block @ w_eff
+
+            # Candidate bias search
+            for bias_candidate in range(default_bias - bias_radius,
+                                        default_bias + bias_radius + 1):
+
+                alpha_tmp = alpha_init.clone()
+                # Iterative alpha refinement
+                for _ in range(5):
+                    _, _, b = assign_fp4_dynamic(
+                        w_block, alpha_tmp, e_bits, m_bits, bias=bias_candidate
+                    )
+                    b_eff = b * m_block
+                    Hb = H_block @ b_eff
+                    num = torch.dot(b_eff, Hw)
+                    den = torch.dot(b_eff, Hb) + 1e-8
+                    alpha_new = num / den
+                    alpha_min = 0.05 * w_eff.abs().mean()
+                    alpha_max = 20.0 * w_eff.abs().mean()
+                    alpha_tmp = torch.clamp(alpha_new, min=alpha_min, max=alpha_max)
+
+                # Loss evaluation
+                residual = w_eff - alpha_tmp * b_eff
+                if use_forward and cached_input is not None:
+                    W_tmp = W_q.clone()
+                    W_tmp[row, i:end] = alpha_tmp * b_eff * sign[row, i:end]
+                    with torch.no_grad():
+                        if W.dim() == 2:
+                            y_q = F.linear(cached_input, W_tmp)
+                        else:
+                            y_q = F.conv2d(
+                                cached_input,
+                                W_tmp.view_as(W),
+                                layer.bias,
+                                stride=layer.stride,
+                                padding=layer.padding
+                            )
+                    loss = ((y_fp - y_q) ** 2).mean()
+                else:
+                    loss = torch.dot(residual, H_block @ residual)
+
+                if loss < best_loss:
+                    best_loss = loss
+                    best_alpha = alpha_tmp
+                    best_bias = bias_candidate
+                    best_b = b
+
+            # Final alpha quantization
+            alpha_block = quantize_scale(best_alpha, e_bits_scale, m_bits_scale)
+
+            # Final basis recompute
+            _, _, b_final = assign_fp4_dynamic(
+                w_block, alpha_block, e_bits, m_bits, bias=best_bias
+            )
+
+            w_hat = alpha_block * b_final
+            w_hat = w_hat * m_block
+            w_hat = w_hat * sign[row, i:end]
+
+            # Store
+            W_q[row, i:end] = w_hat
+            alpha_out[row, i:end] = alpha_block
+            bias_out[row, i:end] = best_bias  # integer per block
+
+            block_idx += 1
+
+    # Reshape back
+    if W.dim() == 4:
+        W_q = W_q.view_as(W)
+        alpha_out = alpha_out.view_as(W)
+        bias_out = bias_out.view_as(W)
+
+    # Final FP decomposition (per-block exponent)
+    sign = torch.sign(W_q)
+    W_abs = W_q.abs()
+
+    if W.dim() == 4:
+        W_mat = W_abs.view(W.shape[0], -1)
+        alpha_mat = alpha_out.view(W.shape[0], -1)
+        bias_mat = bias_out.view(W.shape[0], -1)
+    else:
+        W_mat = W_abs
+        alpha_mat = alpha_out
+        bias_mat = bias_out
+
+    e = torch.zeros_like(W_mat)
+    m = torch.zeros_like(W_mat)
+
+    for row in range(N):
+        for i in range(0, M, block_size):
+            end = min(i + block_size, M)
+            bias_block = int(bias_mat[row, i].item())  # integer per block
+            alpha_block = alpha_mat[row, i]
+            w_block = W_mat[row, i:end]
+
+            e_block, m_block, _ = assign_fp4_dynamic(
+                w_block, alpha_block, e_bits, m_bits, bias=bias_block
+            )
+
+            e[row, i:end] = e_block
+            m[row, i:end] = m_block
+
+    if W.dim() == 4:
+        e = e.view_as(W)
+        m = m.view_as(W)
+
+    return alpha_out, e, m, sign, bias_out
+
+
+
+import torch
+import torch.nn.functional as F
+
+def reconstruct_model_fp_blockdiag_scaled_forward(
+    model,
+    data_loader,
+    block_size,
+    e_bits,
+    m_bits,
+    e_bits_scale,
+    m_bits_scale,
+    device,
+    use_forward=True,
+    top_k=2
+):
+    """
+    Multi-layer FP4 reconstruction for GPT-style models.
+    Forward-pass optimized with Hessian + candidate search.
+
+    Args:
+        model: nn.Module to quantize
+        data_loader: calibration dataloader for forward-pass loss
+        block_size: block size per weight block
+        e_bits, m_bits: FP4 exponent/mantissa bits
+        e_bits_scale, m_bits_scale: alpha quantization bits
+        device: torch.device
+        use_forward: compute forward-pass loss
+        top_k: number of candidates for Hessian selection
+
+    Returns:
+        dict[layer_name] = (alpha_out, e, m, sign, bias_out)
+    """
+    model.eval()
+    model.to(device)
+    layer_outputs = {}
+
+    # Precompute activations for all layers if using forward-pass
+    cached_inputs = {}
+    if use_forward:
+        with torch.no_grad():
+            for batch in data_loader:
+                x = batch[0].to(device) if isinstance(batch, (list, tuple)) else batch.to(device)
+                out = x
+                for name, module in model.named_modules():
+                    if isinstance(module, (torch.nn.Linear, torch.nn.Conv2d)):
+                        cached_inputs[name] = out.detach()
+                    out = module(out)
+
+    # Process each layer
+    for name, layer in model.named_modules():
+        if not isinstance(layer, (torch.nn.Linear, torch.nn.Conv2d)):
+            continue
+
+        # Assume Hessian blocks are precomputed per layer
+        H_blocks_layer = layer.H_blocks if hasattr(layer, 'H_blocks') else [torch.eye(layer.weight.numel(), device=device)]
+
+        cached_input = cached_inputs[name] if use_forward else None
+
+        alpha_out, e, m, sign, bias_out = reconstruct_layer_fp_blockdiag_scaled_v4_forward(
+            layer=layer,
+            H_blocks_layer=H_blocks_layer,
+            block_size=block_size,
+            e_bits=e_bits,
+            m_bits=m_bits,
+            e_bits_scale=e_bits_scale,
+            m_bits_scale=m_bits_scale,
+            device=device,
+            cached_input=cached_input,
+            use_forward=use_forward,
+            top_k=top_k
+        )
+
+        layer_outputs[name] = (alpha_out, e, m, sign, bias_out)
+
+    return layer_outputs
 # def reconstruct_layer_fp_blockdiag_scaled(
 #     layer,
 #     H_blocks_layer,
@@ -1697,7 +2494,17 @@ class QuantLinearFP(nn.Module):
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
     def calibrate_Hessian_scaled(self, data_loader, device, H_block):
-        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+        # alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+        #     self.linear,
+        #     H_block,
+        #     self.block_size,
+        #     self.e_bits,
+        #     self.m_bits,
+        #     self.e_bits_scale,
+        #     self.m_bits_scale,
+        #     device=device
+        # )
+        alpha, e, m, sign, bias = reconstruct_layer_fp_blockdiag_scaled_v4(
             self.linear,
             H_block,
             self.block_size,
@@ -1707,8 +2514,7 @@ class QuantLinearFP(nn.Module):
             self.m_bits_scale,
             device=device
         )
-
-        bias = 2 ** (self.e_bits - 1) - 1
+        # bias = 2 ** (self.e_bits - 1) - 1
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
@@ -1796,7 +2602,17 @@ class QuantConv2dFP(nn.Module):
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
     def calibrate_Hessian_scaled(self, data_loader, device, H_block):
-        alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+        # alpha, e, m, sign = reconstruct_layer_fp_blockdiag_scaled(
+        #     self.conv,
+        #     H_block,
+        #     self.block_size,
+        #     self.e_bits,
+        #     self.m_bits,
+        #     self.e_bits_scale,
+        #     self.m_bits_scale,
+        #     device=device
+        # )
+        alpha, e, m, sign, bias = reconstruct_layer_fp_blockdiag_scaled_v4(
             self.conv,
             H_block,
             self.block_size,
@@ -1806,8 +2622,7 @@ class QuantConv2dFP(nn.Module):
             self.m_bits_scale,
             device=device
         )
-
-        bias = 2 ** (self.e_bits - 1) - 1
+        # bias = 2 ** (self.e_bits - 1) - 1
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
@@ -1877,7 +2692,8 @@ def calibrate_model_Hessian_scaled(model, data_loader, block_size, device):
                 H_block = H_dict_block[module.conv]
             else:
                 continue
-
+            ## Print name of the module being calibrated
+            print(f"Calibrating {module} with Hessian-scaled FP4")
             module.calibrate_Hessian_scaled(data_loader, device, H_block)
 
     return model
@@ -1945,6 +2761,82 @@ def calibrate_model_Hessian_whitened(model, data_loader, block_size, device):
             module.calibrate_Hessian_whitened(data_loader, device, H_block)
 
     return model
+
+def collect_layer_inputs(model, data_loader, device, num_batches=8):
+    model.eval()
+
+    def hook_fn(module, inp, out):
+        module._cached_input = inp[0].detach()
+
+    hooks = []
+
+    # ✅ hook WRAPPERS, not internal layers
+    for module in model.modules():
+        if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
+            hooks.append(module.register_forward_hook(hook_fn))
+
+    # run data
+    with torch.no_grad():
+        for i, (x, _) in enumerate(data_loader):
+            x = x.to(device)
+            model(x)
+            if i >= num_batches:
+                break
+
+    # remove hooks
+    for h in hooks:
+        h.remove()
+
+    return None 
+
+def calibrate_model_Hessian_scaled_forward(model, data_loader, block_size, device):
+    model.eval().to(device)
+
+    print("Collecting activations...")
+    collect_layer_inputs(model, data_loader, device)  # no return
+
+    print("Computing Hessian...")
+    H_dict_block = compute_hessian_blockdiag_model(
+        model, data_loader, device, block_size
+    )
+
+    for module in model.modules():
+        if isinstance(module, (QuantLinearFP, QuantConv2dFP)):
+
+            if not hasattr(module, "_cached_input"):
+                print(f"⚠️ Missing activation for {module}, skipping")
+                continue
+
+            cached_input = module._cached_input
+
+            # underlying layer
+            if hasattr(module, "linear") and module.linear in H_dict_block:
+                weight_layer = module.linear
+            elif hasattr(module, "conv") and module.conv in H_dict_block:
+                weight_layer = module.conv
+            else:
+                continue
+
+            print(f"Calibrating {module}")
+
+            alpha, e, m, sign, bias = reconstruct_layer_fp_blockdiag_scaled_v4_forward(
+                weight_layer,
+                H_dict_block[weight_layer],
+                module.block_size,
+                module.e_bits,
+                module.m_bits,
+                module.e_bits_scale,
+                module.m_bits_scale,
+                device,
+                cached_input=cached_input
+            )
+
+            base_val = alpha * (2.0 ** (e.float() - bias))
+            fine = base_val * m.float() / (2 ** module.m_bits) if module.m_bits > 0 else 0.0
+            module.weight_q = (base_val + fine) * sign
+
+    return model
+
 
 def fold_bn_into_conv(conv, bn):
     """
@@ -2017,7 +2909,7 @@ def quantize_model_fp(model,
                       device="cuda",
                       use_HG=True,
                       use_Hessian=False,
-                      use_adap=False):
+                      use_adap=False, use_forward=False):
     """
     Quantize a model to FP4-like format with optional HG or Hessian calibration.
     """
@@ -2046,6 +2938,9 @@ def quantize_model_fp(model,
     elif use_adap:
         print("Using adaptive mesh calibration")
         model = calibrate_model_Hessian_scaled(model, data_loader, block_size, device)
+    elif use_forward:
+        print("Using forward reconstruction calibration")
+        model = calibrate_model_Hessian_scaled_forward(model, data_loader, block_size, device)
     else:
         print("Using standard calibration")
         model = calibrate_model(model, data_loader, device)

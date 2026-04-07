@@ -12,13 +12,19 @@ from models import vgg19
 import torch
 import os
 networks = ["LeNet5", "LeNet300", "DenseNet40", "ResNet56", "VGG19", "ResNet32"]
-data = ["MNIST", "CIFAR10", "CIFAR100", "tiny_imagenet"]
+dataset = ["MNIST", "CIFAR10", "CIFAR100", "tiny_imagenet"]
 geometry = True
-batch_size = 512
+batch_size = 600
 bitwidth = 4
+e_bits = 2
+m_bits = 1
+e_scale_bits = 4
+m_scale_bits = 3
+blocksize = 32
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-net = networks[2]
-data = data[1]
+net = networks[4]
+data = dataset[2]
+res_file = "quant_res.csv"
 precision_config = {
     "first": (4, 3),
     "last": (4, 3),
@@ -257,7 +263,7 @@ def TestNetwork(model, val_dataset, filepath=accuracy_filename):
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-data = pd.DataFrame(columns=["name", "sparsity"])
+data_res = pd.DataFrame(columns=["name", "sparsity"])
 log_dynamic_ranges = []
 def plot_weights(model):
     for name, module in model.named_modules():
@@ -271,7 +277,7 @@ def plot_weights(model):
             unique_weights = len(np.unique(weights))
             print(f"Unique weights: {unique_weights}")
             sparsity = np.sum(weights == 0) / weights_no
-            data.loc[len(data)] = [name, sparsity]
+            data.loc[len(data_res)] = [name, sparsity]
             weights = weights[weights != 0]
             max_weight = np.max(np.abs(weights))
             min_weight = np.min(np.abs(weights))
@@ -288,7 +294,7 @@ def plot_weights(model):
             plt.close()
             print(f"File exists after save: {os.path.exists(f'{folder_name}/{name}_weights_histogram.png')}")
 # Save the sparsity data to a CSV file
-data.to_csv(f"{folder_name}/{csv_file}", index=False)
+data_res.to_csv(f"{folder_name}/{csv_file}", index=False)
 plt.figure(figsize=(10, 5))
 ## plot the log dynamic ranges
 names = [item[0] for item in log_dynamic_ranges]
@@ -428,14 +434,15 @@ def evaluate(model, data_loader, device):
             correct += (pred == y).sum().item()
             total += y.size(0)
     print(f"Accuracy: {100.*correct/total:.2f}%  ({correct}/{total})")
-evaluate(reg_model, val_dataloader, device)
+    return correct / total
+_ = evaluate(reg_model, val_dataloader, device)
 # quant_model = geometry_aware_rounding_BRECQ(reg_model, val_dataloader, device=device, name=net, bitwidth=bitwidth)
 # quant_model = brecq_quantize(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry)
 # quant_model = brecq_quantize_exp_fp(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 # quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 import copy
 # model_to_quantize = copy.deepcopy(reg_model)
-quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=128,e_bits=2,m_bits=1,e_bits_scale=4,m_bits_scale=3, device = device, use_HG=False, use_Hessian=False, use_adap=True)
+quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap=False, use_forward=True)
 # quant_model = quantize_net_fixed(model_to_quantize,val_dataloader,block_size=64, mbits_weight=1, ebits_weight=2, mbits_scale=3, ebits_scale=4)
 
 # quant_model = recalibrate_batchnorm(quant_model, train_dataloader, device=device, num_batches=50)
@@ -465,7 +472,7 @@ with open(bitwidth_geometry_filename, "a") as f:
 
 
 print("=== TEST 1: Original model ===")
-evaluate(reg_model, val_dataloader, device)
+original = evaluate(reg_model, val_dataloader, device)
 
 # ============================================================
 # TEST 2: Does quantized model WITH weight_q replaced by 
@@ -480,8 +487,34 @@ for module in quant_model.modules():
     elif isinstance(module, QuantConv2dFP):
         module.weight_q = module.conv.weight.data.clone()
 
-evaluate(quant_model, val_dataloader, device)
+quant = evaluate(quant_model, val_dataloader, device)
+import pandas as pd
+## The file is already created, so we will append to it
+# columns in include net, dataset, acc_perplex_original, acc_perplex_quantized, batch_size, e_bits, m_bits, e_bits_scale, m_bits_scale, block_size
+df = pd.DataFrame({
+    "net": [net],
+    "dataset": [data],  # FIXED
+    "acc_perplex_original": [original],
+    "acc_perplex_quantized": [quant],
+    "batch_size": [batch_size],
+    "e_bits": [e_bits],
+    "m_bits": [m_bits],
+    "e_bits_scale": [e_scale_bits],
+    "m_bits_scale": [m_scale_bits],
+    "block_size": [blocksize]
+})
 
+cols = [
+    "net", "dataset", "acc_perplex_original", "acc_perplex_quantized",
+    "batch_size", "e_bits", "m_bits",
+    "e_bits_scale", "m_bits_scale", "block_size"
+]
+df = df[cols]
+
+if not os.path.exists(res_file):
+    df.to_csv(res_file, index=False)
+else:
+    df.to_csv(res_file, mode='a', header=False, index=False)
 # ============================================================
 # TEST 3: Are quantized weights actually being used in forward()?
 # Print weight_q vs what forward() sees

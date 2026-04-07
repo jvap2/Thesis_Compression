@@ -1,1 +1,1 @@
-Accuracy of the quantized model on the test set: 97.34%
+Accuracy of the quantized model on the test set: 98.56%
