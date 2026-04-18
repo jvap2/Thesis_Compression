@@ -10,7 +10,8 @@ from .fp_flexround import(
 )
 
 from .bit_split import(
-    quantize_model_fp
+    quantize_model_fp,
+    apply_smoothquant
 )
 
 
@@ -18,5 +19,6 @@ from .bit_split import(
 __all__ = [
     'brecq_quantize_exp_fp',
     'brecq_quantize_exp_fp_scale',
-    'quantize_model_fp'
+    'quantize_model_fp',
+    'apply_smoothquant'
 ]

@@ -20,9 +20,9 @@ e_bits = 2
 m_bits = 1
 e_scale_bits = 4
 m_scale_bits = 3
-blocksize = 32
+blocksize = 16
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-net = networks[4]
+net = networks[-1]
 data = dataset[2]
 res_file = "quant_res.csv"
 precision_config = {
@@ -442,7 +442,8 @@ _ = evaluate(reg_model, val_dataloader, device)
 # quant_model = brecq_quantize_exp_fp_scale(model=reg_model, calibration_loader=val_dataloader, name=net,bitwidth=bitwidth, geometry = geometry, batch_size=batch_size)
 import copy
 # model_to_quantize = copy.deepcopy(reg_model)
-quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap=False, use_forward=True)
+hadamard = False
+quant_model = quantize_model_fp(model_to_quantize,val_dataloader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap= (not hadamard), use_forward=False, Hadamard=hadamard)
 # quant_model = quantize_net_fixed(model_to_quantize,val_dataloader,block_size=64, mbits_weight=1, ebits_weight=2, mbits_scale=3, ebits_scale=4)
 
 # quant_model = recalibrate_batchnorm(quant_model, train_dataloader, device=device, num_batches=50)
@@ -501,7 +502,8 @@ df = pd.DataFrame({
     "m_bits": [m_bits],
     "e_bits_scale": [e_scale_bits],
     "m_bits_scale": [m_scale_bits],
-    "block_size": [blocksize]
+    "block_size": [blocksize],
+    "mode": ["hadamard" if hadamard else "adap"]
 })
 
 cols = [

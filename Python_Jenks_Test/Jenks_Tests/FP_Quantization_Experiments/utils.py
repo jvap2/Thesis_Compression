@@ -119,3 +119,147 @@ def hadamard_inverse(x, pad):
     x_pad = torch.cat([x, torch.zeros(pad, device=x.device)])
     y = hadamard_transform(x_pad)
     return y[:k]
+
+import math
+import torch.nn.functional as F
+
+
+# def fast_hadamard_transform(x):
+#     """
+#     Standard Walsh-Hadamard Transform. 
+#     x: (B, N) where N is a power of 2.
+#     """
+#     n = x.shape[-1]
+#     if n == 1:
+#         return x
+#     x = x.view(-1, 2, n // 2)
+#     x = torch.stack([x[:, 0] + x[:, 1], x[:, 0] - x[:, 1]], dim=1)
+#     return fast_hadamard_transform(x).view(-1, n) / torch.sqrt(torch.tensor(2.0))
+
+def apply_hadamard_to_layer(W, mask):
+    # Padding to power of 2 for FHT
+    orig_shape = W.shape
+    M = W.shape[-1]
+    next_pow2 = 2**math.ceil(math.log2(M))
+    
+    W_padded = F.pad(W, (0, next_pow2 - M))
+    # Transform
+    W_had = fast_hadamard_transform(W_padded)
+    return W_had, next_pow2
+
+def apply_blockwise_hadamard(W, block_size=32):
+    """
+    W: (N, M) - flattened layer weights
+    block_size: power of 2
+    """
+    N, M = W.shape
+    # Pad M to be a multiple of block_size if necessary
+    pad_len = (block_size - (M % block_size)) % block_size
+    if pad_len > 0:
+        W = F.pad(W, (0, pad_len))
+    
+    new_M = W.shape[-1]
+    # Reshape to treat blocks as the last dimension
+    # (N * (new_M // block_size), block_size)
+    W_blocks = W.view(-1, block_size)
+    
+    # Transform each block
+    W_had_blocks = fast_hadamard_transform(W_blocks)
+    
+    # Return to (N, new_M)
+    return W_had_blocks.view(N, new_M), pad_len
+
+def invert_blockwise_hadamard(W_had, block_size, pad_len):
+    N, M = W_had.shape
+    W_blocks = W_had.view(-1, block_size)
+    # FHT is its own inverse (with normalization)
+    W_inv_blocks = fast_hadamard_transform(W_blocks)
+    W_inv = W_inv_blocks.view(N, M)
+    
+    if pad_len > 0:
+        W_inv = W_inv[:, :-pad_len]
+    return W_inv
+
+
+
+
+def fast_hadamard_transform(x):
+    """
+    Vectorized Fast Walsh-Hadamard Transform.
+    x: tensor of shape (batch, n) where n is a power of 2.
+    """
+    n = x.shape[-1]
+    if n == 1:
+        return x
+    
+    # Check if power of 2
+    if (n & (n - 1)) != 0:
+        raise ValueError(f"Input size {n} must be a power of 2 for FHT.")
+
+    # Reshape and compute butterfly operations iteratively
+    h = 1
+    while h < n:
+        x = x.view(-1, n // (2 * h), 2, h)
+        # Apply the Hadamard butterfly: [1, 1; 1, -1]
+        x_left = x[:, :, 0, :] + x[:, :, 1, :]
+        x_right = x[:, :, 0, :] - x[:, :, 1, :]
+        x = torch.cat((x_left.unsqueeze(2), x_right.unsqueeze(2)), dim=2)
+        h *= 2
+    
+    # Return flattened and normalized (optional: / sqrt(n))
+    # For smoothing weights, usually you normalize by sqrt(n)
+    return x.view(-1, n) / math.sqrt(n)
+
+def hadamard_transform_wrapper(w_block):
+    """
+    Handles padding for non-power-of-2 inputs (like your size 27)
+    and applies the FHT.
+    """
+    device = w_block.device
+    original_shape = w_block.shape
+    n = original_shape[-1]
+    
+    # 1. Calculate the next power of 2
+    next_pow2 = 2**int(math.ceil(math.log2(n)))
+    
+    # 2. Pad if necessary
+    if n != next_pow2:
+        padding_size = next_pow2 - n
+        # Pad the last dimension with zeros
+        w_padded = F.pad(w_block, (0, padding_size))
+    else:
+        w_padded = w_block
+        
+    # 3. Reshape for FHT (ensure batch dim)
+    input_tensor = w_padded.view(-1, next_pow2)
+    
+    # 4. Apply Transform
+    w_had_padded = fast_hadamard_transform(input_tensor)
+    
+    # 5. Crop back to original size and reshape back to original dimensions
+    # Note: Information is spread, so cropping back is common in block-wise smoothing
+    w_had = w_had_padded[:, :n]
+    return w_had.view(original_shape)
+
+def inverse_hadamard_transform_wrapper(w_had_block):
+    """
+    Inverse logic to correctly recover spatial weights from Hadamard components.
+    """
+    n = w_had_block.shape[-1]
+    next_pow2 = 2**int(math.ceil(math.log2(n)))
+    
+    # 1. Re-pad to the power-of-2 used in the forward pass
+    if n != next_pow2:
+        padding_size = next_pow2 - n
+        w_padded = torch.nn.functional.pad(w_had_block, (0, padding_size))
+    else:
+        w_padded = w_had_block
+    
+    # 2. Apply FHT
+    # Note: fast_hadamard_transform divides by sqrt(N). 
+    # To invert a normalized FHT, we just run it again! 
+    # Because (H/√N) * (H/√N) = (H*H)/N = I
+    w_spatial_padded = fast_hadamard_transform(w_padded.view(-1, next_pow2))
+    
+    # 3. Crop back to original size
+    return w_spatial_padded[:, :n].view(w_had_block.shape)
