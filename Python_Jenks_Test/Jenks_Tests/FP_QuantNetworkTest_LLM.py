@@ -17,7 +17,7 @@ m_scale_bits = 0
 blocksize = 64
 batch_size = 8
 from huggingface_hub import login
-login(token="HF_TOKEN_REMOVED")
+
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
