@@ -2788,6 +2788,207 @@ def assign_fp4_dynamic_batched(w_block, alpha, e_bits, m_bits, bias=None, bias_p
 #     return alpha_out, e_out, m_out, sign_f, bias_out
 
 
+# def reconstruct_layer_fp_blockdiag_scaled_v5(
+#     layer,
+#     H_blocks_layer,
+#     block_size,
+#     e_bits,
+#     m_bits,
+#     e_bits_scale,
+#     m_bits_scale,
+#     device
+# ):
+#     W = layer.weight.data.to(device)
+#     mask = (W != 0).float()
+
+#     if W.dim() == 4:
+#         W_mat = W.view(W.shape[0], -1)
+#         mask_mat = mask.view(W.shape[0], -1)
+#     else:
+#         W_mat = W
+#         mask_mat = mask
+
+#     N, M = W_mat.shape
+
+#     sign_mat = torch.sign(W_mat)
+#     W_abs    = W_mat.abs()
+
+#     # Free W and mask early
+#     del W, mask
+#     torch.cuda.empty_cache()
+
+#     # All output tensors kept on CPU to save VRAM
+#     W_q       = torch.zeros(N, M, dtype=torch.float32)   # CPU
+#     alpha_out = torch.zeros(N, M, dtype=torch.float32)   # CPU
+#     bias_out  = torch.zeros(N, M, dtype=torch.float32)   # CPU
+
+#     default_bias    = 2 ** (e_bits - 1) - 1
+#     bias_radius     = max(1, 2 ** (e_bits - 2))
+#     bias_candidates = list(range(default_bias - bias_radius,
+#                                  default_bias + bias_radius + 1))
+
+#     # ----------------------------------------------------------------
+#     # First pass — block-wise alpha/bias optimisation
+#     # ----------------------------------------------------------------
+#     for block_idx, i in enumerate(range(0, M, block_size)):
+#         end = min(i + block_size, M)
+#         k   = end - i
+
+#         w_block = W_abs[:, i:end]
+#         m_block = mask_mat[:, i:end]
+#         s_block = sign_mat[:, i:end]
+
+#         H_block = H_blocks_layer[block_idx].to(device)
+#         if H_block.shape[0] != k:
+#             H_block = H_block[:k, :k]
+
+#         w_eff  = w_block * m_block
+#         pruned = m_block.sum(dim=1) < 1e-8
+
+#         w_sq_mean = (w_eff ** 2).mean(dim=1).clamp(min=1e-8)
+#         alpha     = torch.sqrt(w_sq_mean).clamp(min=1e-4)
+#         alpha_min = 0.05 * w_eff.abs().mean(dim=1).clamp(min=1e-8)
+#         alpha_max = 20.0 * w_eff.abs().mean(dim=1).clamp(min=1e-8)
+
+#         Hw = w_eff @ H_block.T
+
+#         best_loss  = torch.full((N,), float('inf'), device=device)
+#         best_alpha = alpha.clone()
+#         best_bias  = torch.full((N,), default_bias, device=device, dtype=torch.long)
+#         best_b     = torch.zeros_like(w_eff)
+
+#         for bias_candidate in bias_candidates:
+#             alpha_tmp = alpha.clone()
+
+#             for _ in range(5):
+#                 _, _, b = assign_fp4_dynamic_batched(
+#                     w_block, alpha_tmp, e_bits, m_bits, bias=bias_candidate)
+#                 b_eff = b * m_block
+#                 Hb    = b_eff @ H_block.T
+#                 num   = (b_eff * Hw).sum(dim=1)
+#                 den   = (b_eff * Hb).sum(dim=1) + 1e-8
+#                 alpha_new = num / den
+#                 alpha_tmp = torch.clamp(alpha_new, min=alpha_min, max=alpha_max)
+#                 del b, Hb, num, den, alpha_new
+
+#             b_eff    = b_eff
+#             residual = w_eff - alpha_tmp.unsqueeze(1) * b_eff
+#             Hr       = residual @ H_block.T
+#             loss     = (residual * Hr).sum(dim=1)
+
+#             improved   = loss < best_loss
+#             best_loss  = torch.where(improved, loss, best_loss)
+#             best_alpha = torch.where(improved, alpha_tmp, best_alpha)
+#             best_bias  = torch.where(
+#                 improved,
+#                 torch.full_like(best_bias, bias_candidate),
+#                 best_bias)
+#             best_b = torch.where(
+#                 improved.unsqueeze(1).expand_as(b_eff),
+#                 b_eff, best_b)
+
+#             del alpha_tmp, b_eff, residual, Hr, loss, improved
+
+#         # Free per-block intermediates before final recompute
+#         del Hw, alpha, alpha_min, alpha_max, w_sq_mean
+#         torch.cuda.empty_cache()
+
+#         alpha_q = quantize_scale_batched(best_alpha, e_bits_scale, m_bits_scale)
+
+#         _, _, b_final = assign_fp4_dynamic_batched(
+#             w_block, alpha_q, e_bits, m_bits, bias_per_row=best_bias)
+
+#         w_hat = alpha_q.unsqueeze(1) * b_final
+#         w_hat = w_hat * m_block * s_block
+#         w_hat[pruned]   = 0.0
+#         alpha_q[pruned] = 1.0
+
+#         # Store results on CPU immediately to free GPU memory
+#         W_q[:, i:end]       = w_hat.cpu()
+#         alpha_out[:, i:end] = alpha_q.unsqueeze(1).expand(-1, k).cpu()
+#         bias_out[:, i:end]  = best_bias.unsqueeze(1).float().expand(-1, k).cpu()
+
+#         # Free everything from this block before next iteration
+#         del w_block, m_block, s_block, w_eff, pruned
+#         del H_block, best_loss, best_alpha, best_bias, best_b
+#         del alpha_q, b_final, w_hat
+#         torch.cuda.empty_cache()
+
+#     # Free GPU tensors from first pass
+#     del W_abs, sign_mat, mask_mat, W_mat
+#     torch.cuda.empty_cache()
+
+#     # ----------------------------------------------------------------
+#     # Second decomposition pass — entirely on CPU
+#     # Compute e, m on CPU then reconstruct weight_q on CPU
+#     # Only one final tensor is moved to GPU
+#     # ----------------------------------------------------------------
+
+#     sign_f  = torch.sign(W_q)     # CPU [N, M]
+#     W_abs_f = W_q.abs()           # CPU [N, M]
+#     del W_q
+
+#     # Store original shape for reshape at end
+#     layer_W        = layer.weight.data
+#     original_shape = layer_W.shape
+
+#     if layer_W.dim() == 4:
+#         N4        = original_shape[0]
+#         W_abs_f   = W_abs_f.view(N4, -1)
+#         alpha_out = alpha_out.view(N4, -1)
+#         bias_out  = bias_out.view(N4, -1)
+#         sign_f    = sign_f.view(N4, -1)
+
+#     # e_out and m_out stay on CPU throughout
+#     e_out = torch.zeros(W_abs_f.shape, dtype=torch.long)    # CPU
+#     m_out = torch.zeros(W_abs_f.shape, dtype=torch.long)    # CPU
+
+#     for block_idx, i in enumerate(range(0, M, block_size)):
+#         end = min(i + block_size, M)
+
+#         # Bring only this block slice to GPU
+#         bias_col  = bias_out[:, i].long().to(device)
+#         alpha_col = alpha_out[:, i].to(device)
+#         w_col     = W_abs_f[:, i:end].to(device)
+
+#         for bias_val in bias_col.unique():
+#             rows = (bias_col == bias_val).nonzero(as_tuple=True)[0]
+#             e_b, m_b, _ = assign_fp4_dynamic(
+#                 w_col[rows], alpha_col[rows], e_bits, m_bits,
+#                 bias=int(bias_val.item()))
+#             e_out[rows, i:end] = e_b.cpu()
+#             m_out[rows, i:end] = m_b.cpu()
+#             del e_b, m_b
+
+#         del bias_col, alpha_col, w_col
+#         torch.cuda.empty_cache()
+
+#     del W_abs_f
+
+#     # ----------------------------------------------------------------
+#     # Final FP reconstruction on CPU
+#     # weight_q = sign * alpha * 2^(e - bias) * (1 + m / 2^m_bits)
+#     # Only this single tensor is moved to GPU
+#     # ----------------------------------------------------------------
+#     bias_mat = bias_out.float()                              # CPU [N, M]
+#     base     = alpha_out * (2.0 ** (e_out.float() - bias_mat))
+#     fine     = base * m_out.float() / (2 ** m_bits) if m_bits > 0 else 0.0
+#     weight_q_cpu = (base + fine) * sign_f
+
+#     del alpha_out, bias_out, bias_mat, e_out, m_out, base, sign_f
+#     if m_bits > 0:
+#         del fine
+
+#     # Reshape back to original weight shape if needed
+#     if layer_W.dim() == 4:
+#         weight_q_cpu = weight_q_cpu.view(original_shape)
+
+#     # Single GPU transfer — ~67MB for LLaMA's largest layer vs ~335MB before
+#     return weight_q_cpu.to(device)
+
+
+## ABOVE IS THE ORIGINAL
+
 def reconstruct_layer_fp_blockdiag_scaled_v5(
     layer,
     H_blocks_layer,
@@ -2798,68 +2999,65 @@ def reconstruct_layer_fp_blockdiag_scaled_v5(
     m_bits_scale,
     device
 ):
-    W = layer.weight.data.to(device)
+    W    = layer.weight.data.to(device)
     mask = (W != 0).float()
-
+ 
     if W.dim() == 4:
-        W_mat = W.view(W.shape[0], -1)
+        W_mat    = W.view(W.shape[0], -1)
         mask_mat = mask.view(W.shape[0], -1)
     else:
-        W_mat = W
+        W_mat    = W
         mask_mat = mask
-
+ 
     N, M = W_mat.shape
-
+ 
     sign_mat = torch.sign(W_mat)
     W_abs    = W_mat.abs()
-
-    # Free W and mask early
+ 
     del W, mask
     torch.cuda.empty_cache()
-
-    # All output tensors kept on CPU to save VRAM
-    W_q       = torch.zeros(N, M, dtype=torch.float32)   # CPU
-    alpha_out = torch.zeros(N, M, dtype=torch.float32)   # CPU
-    bias_out  = torch.zeros(N, M, dtype=torch.float32)   # CPU
-
+ 
+    # Output tensors on CPU
+    W_q       = torch.zeros(N, M, dtype=torch.float32)
+    alpha_out = torch.zeros(N, M, dtype=torch.float32)
+    bias_out  = torch.zeros(N, M, dtype=torch.float32)
+ 
     default_bias    = 2 ** (e_bits - 1) - 1
     bias_radius     = max(1, 2 ** (e_bits - 2))
     bias_candidates = list(range(default_bias - bias_radius,
                                  default_bias + bias_radius + 1))
-
-    # ----------------------------------------------------------------
-    # First pass — block-wise alpha/bias optimisation
-    # ----------------------------------------------------------------
+ 
+    # ── First pass: block-wise alpha/bias optimisation ──────────────────────
     for block_idx, i in enumerate(range(0, M, block_size)):
         end = min(i + block_size, M)
         k   = end - i
-
+ 
         w_block = W_abs[:, i:end]
         m_block = mask_mat[:, i:end]
         s_block = sign_mat[:, i:end]
-
+ 
         H_block = H_blocks_layer[block_idx].to(device)
         if H_block.shape[0] != k:
             H_block = H_block[:k, :k]
-
+ 
         w_eff  = w_block * m_block
         pruned = m_block.sum(dim=1) < 1e-8
-
+ 
         w_sq_mean = (w_eff ** 2).mean(dim=1).clamp(min=1e-8)
         alpha     = torch.sqrt(w_sq_mean).clamp(min=1e-4)
         alpha_min = 0.05 * w_eff.abs().mean(dim=1).clamp(min=1e-8)
         alpha_max = 20.0 * w_eff.abs().mean(dim=1).clamp(min=1e-8)
-
+ 
         Hw = w_eff @ H_block.T
-
+ 
         best_loss  = torch.full((N,), float('inf'), device=device)
         best_alpha = alpha.clone()
         best_bias  = torch.full((N,), default_bias, device=device, dtype=torch.long)
         best_b     = torch.zeros_like(w_eff)
-
+ 
         for bias_candidate in bias_candidates:
             alpha_tmp = alpha.clone()
-
+ 
             for _ in range(5):
                 _, _, b = assign_fp4_dynamic_batched(
                     w_block, alpha_tmp, e_bits, m_bits, bias=bias_candidate)
@@ -2870,12 +3068,12 @@ def reconstruct_layer_fp_blockdiag_scaled_v5(
                 alpha_new = num / den
                 alpha_tmp = torch.clamp(alpha_new, min=alpha_min, max=alpha_max)
                 del b, Hb, num, den, alpha_new
-
+ 
             b_eff    = b_eff
             residual = w_eff - alpha_tmp.unsqueeze(1) * b_eff
             Hr       = residual @ H_block.T
             loss     = (residual * Hr).sum(dim=1)
-
+ 
             improved   = loss < best_loss
             best_loss  = torch.where(improved, loss, best_loss)
             best_alpha = torch.where(improved, alpha_tmp, best_alpha)
@@ -2886,71 +3084,67 @@ def reconstruct_layer_fp_blockdiag_scaled_v5(
             best_b = torch.where(
                 improved.unsqueeze(1).expand_as(b_eff),
                 b_eff, best_b)
-
+ 
             del alpha_tmp, b_eff, residual, Hr, loss, improved
-
-        # Free per-block intermediates before final recompute
+ 
         del Hw, alpha, alpha_min, alpha_max, w_sq_mean
         torch.cuda.empty_cache()
-
+ 
         alpha_q = quantize_scale_batched(best_alpha, e_bits_scale, m_bits_scale)
-
+ 
         _, _, b_final = assign_fp4_dynamic_batched(
             w_block, alpha_q, e_bits, m_bits, bias_per_row=best_bias)
-
+ 
         w_hat = alpha_q.unsqueeze(1) * b_final
         w_hat = w_hat * m_block * s_block
         w_hat[pruned]   = 0.0
         alpha_q[pruned] = 1.0
-
-        # Store results on CPU immediately to free GPU memory
+ 
         W_q[:, i:end]       = w_hat.cpu()
         alpha_out[:, i:end] = alpha_q.unsqueeze(1).expand(-1, k).cpu()
         bias_out[:, i:end]  = best_bias.unsqueeze(1).float().expand(-1, k).cpu()
-
-        # Free everything from this block before next iteration
+ 
         del w_block, m_block, s_block, w_eff, pruned
         del H_block, best_loss, best_alpha, best_bias, best_b
         del alpha_q, b_final, w_hat
         torch.cuda.empty_cache()
-
-    # Free GPU tensors from first pass
+ 
     del W_abs, sign_mat, mask_mat, W_mat
     torch.cuda.empty_cache()
-
-    # ----------------------------------------------------------------
-    # Second decomposition pass — entirely on CPU
-    # Compute e, m on CPU then reconstruct weight_q on CPU
-    # Only one final tensor is moved to GPU
-    # ----------------------------------------------------------------
-
-    sign_f  = torch.sign(W_q)     # CPU [N, M]
-    W_abs_f = W_q.abs()           # CPU [N, M]
+ 
+    # ── Save per-block alpha and bias BEFORE cleanup ─────────────────────────
+    # alpha_out is [N, M] — constant within each block column.
+    # Reduce to [N, n_blocks] by taking the first element of each block.
+    n_blocks        = math.ceil(M / block_size)
+    alpha_out_saved = alpha_out[:, ::block_size][:, :n_blocks].clone()   # [N, n_blocks] CPU
+    bias_out_saved  = bias_out[:, ::block_size][:, :n_blocks].long()     # [N, n_blocks] CPU
+    # ─────────────────────────────────────────────────────────────────────────
+ 
+    # ── Second pass: decompose into e, m on CPU ──────────────────────────────
+    sign_f  = torch.sign(W_q)
+    W_abs_f = W_q.abs()
     del W_q
-
-    # Store original shape for reshape at end
+ 
     layer_W        = layer.weight.data
     original_shape = layer_W.shape
-
+ 
     if layer_W.dim() == 4:
         N4        = original_shape[0]
         W_abs_f   = W_abs_f.view(N4, -1)
         alpha_out = alpha_out.view(N4, -1)
         bias_out  = bias_out.view(N4, -1)
         sign_f    = sign_f.view(N4, -1)
-
-    # e_out and m_out stay on CPU throughout
-    e_out = torch.zeros(W_abs_f.shape, dtype=torch.long)    # CPU
-    m_out = torch.zeros(W_abs_f.shape, dtype=torch.long)    # CPU
-
+ 
+    e_out = torch.zeros(W_abs_f.shape, dtype=torch.long)
+    m_out = torch.zeros(W_abs_f.shape, dtype=torch.long)
+ 
     for block_idx, i in enumerate(range(0, M, block_size)):
         end = min(i + block_size, M)
-
-        # Bring only this block slice to GPU
+ 
         bias_col  = bias_out[:, i].long().to(device)
         alpha_col = alpha_out[:, i].to(device)
         w_col     = W_abs_f[:, i:end].to(device)
-
+ 
         for bias_val in bias_col.unique():
             rows = (bias_col == bias_val).nonzero(as_tuple=True)[0]
             e_b, m_b, _ = assign_fp4_dynamic(
@@ -2959,32 +3153,34 @@ def reconstruct_layer_fp_blockdiag_scaled_v5(
             e_out[rows, i:end] = e_b.cpu()
             m_out[rows, i:end] = m_b.cpu()
             del e_b, m_b
-
+ 
         del bias_col, alpha_col, w_col
         torch.cuda.empty_cache()
-
+ 
     del W_abs_f
-
-    # ----------------------------------------------------------------
-    # Final FP reconstruction on CPU
-    # weight_q = sign * alpha * 2^(e - bias) * (1 + m / 2^m_bits)
-    # Only this single tensor is moved to GPU
-    # ----------------------------------------------------------------
-    bias_mat = bias_out.float()                              # CPU [N, M]
-    base     = alpha_out * (2.0 ** (e_out.float() - bias_mat))
-    fine     = base * m_out.float() / (2 ** m_bits) if m_bits > 0 else 0.0
+ 
+    # ── Final FP reconstruction on CPU ───────────────────────────────────────
+    bias_mat     = bias_out.float()
+    base         = alpha_out * (2.0 ** (e_out.float() - bias_mat))
+    fine         = base * m_out.float() / (2 ** m_bits) if m_bits > 0 else 0.0
     weight_q_cpu = (base + fine) * sign_f
-
+ 
     del alpha_out, bias_out, bias_mat, e_out, m_out, base, sign_f
     if m_bits > 0:
         del fine
-
-    # Reshape back to original weight shape if needed
+ 
     if layer_W.dim() == 4:
-        weight_q_cpu = weight_q_cpu.view(original_shape)
+        weight_q_cpu    = weight_q_cpu.view(original_shape)
+        alpha_out_saved = alpha_out_saved.view(original_shape[0], -1)
+        bias_out_saved  = bias_out_saved.view(original_shape[0], -1)
+ 
+    # ── Return dict ───────────────────────────────────────────────────────────
+    return {
+        "weight_q": weight_q_cpu.to(device),   # [N, M] on device, as before
+        "alpha":    alpha_out_saved,            # [N, n_blocks] on CPU
+        "bias":     bias_out_saved,             # [N, n_blocks] on CPU (long)
+    }
 
-    # Single GPU transfer — ~67MB for LLaMA's largest layer vs ~335MB before
-    return weight_q_cpu.to(device)
 
 # def reconstruct_layer_fp_blockdiag_scaled_v4_fast(
 #     layer, H_blocks_layer, block_size,
@@ -7897,6 +8093,14 @@ def reconstruct_model_fp_blockdiag_scaled_forward(
 # =========================================================
 # 🔹 QUANTIZED LINEAR
 # =========================================================
+
+
+def _to_per_block(tensor: torch.Tensor, block_size: int, M: int) -> torch.Tensor:
+    """Take the first element of each block column: [N, M] → [N, n_blocks]."""
+    n_blocks = math.ceil(M / block_size)
+    return tensor[:, ::block_size][:, :n_blocks]
+
+
 class QuantLinearFP(nn.Module):
     def __init__(self, linear, block_size, e_bits, m_bits, e_bits_scale, m_bits_scale):
         super().__init__()
@@ -7967,18 +8171,39 @@ class QuantLinearFP(nn.Module):
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
+    # def calibrate_Hessian_scaled(self, data_loader, device, H_block):
+    #     weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
+    #         self.linear,          # or self.conv / self.conv1d
+    #         H_block,
+    #         self.block_size,
+    #         self.e_bits,
+    #         self.m_bits,
+    #         self.e_bits_scale,
+    #         self.m_bits_scale,
+    #         device=device)
+    #     self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
+    #     del weight_q
+    #     torch.cuda.empty_cache()
     def calibrate_Hessian_scaled(self, data_loader, device, H_block):
-        weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
-            self.linear,          # or self.conv / self.conv1d
+        """
+        Adaptive mesh (v5 scaled) calibration.
+        reconstruct_layer_fp_blockdiag_scaled_v5 now returns a dict.
+        """
+        res = reconstruct_layer_fp_blockdiag_scaled_v5(
+            self.linear,
             H_block,
             self.block_size,
             self.e_bits,
             self.m_bits,
             self.e_bits_scale,
             self.m_bits_scale,
-            device=device)
-        self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
-        del weight_q
+            device=device,
+        )
+        self.weight_q = res["weight_q"].view_as(self.linear.weight)
+        self.alpha_q  = res["alpha"]   # [N, n_blocks] CPU float32
+        self.bias_q   = res["bias"]    # [N, n_blocks] CPU long
+ 
+        del res
         torch.cuda.empty_cache()
     def calibrate_Hessian_Hadamard(self, data_loader, device, H_block):
             # We call the V5 Final version which returns a dict
@@ -8088,18 +8313,39 @@ class QuantConv2dFP(nn.Module):
         base = alpha * (2.0 ** (e.float() - bias))
         fine = base * m.float() / (2 ** self.m_bits) if self.m_bits > 0 else 0.0
         self.weight_q = (base + fine) * sign
+    # def calibrate_Hessian_scaled(self, data_loader, device, H_block):
+    #     weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
+    #         self.conv,          # or self.conv / self.conv1d
+    #         H_block,
+    #         self.block_size,
+    #         self.e_bits,
+    #         self.m_bits,
+    #         self.e_bits_scale,
+    #         self.m_bits_scale,
+    #         device=device)
+    #     self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
+    #     del weight_q
+    #     torch.cuda.empty_cache()
     def calibrate_Hessian_scaled(self, data_loader, device, H_block):
-        weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
-            self.conv,          # or self.conv / self.conv1d
+        """
+        Adaptive mesh (v5 scaled) calibration.
+        reconstruct_layer_fp_blockdiag_scaled_v5 now returns a dict.
+        """
+        res = reconstruct_layer_fp_blockdiag_scaled_v5(
+            self.conv,
             H_block,
             self.block_size,
             self.e_bits,
             self.m_bits,
             self.e_bits_scale,
             self.m_bits_scale,
-            device=device)
-        self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
-        del weight_q
+            device=device,
+        )
+        self.weight_q = res["weight_q"].view_as(self.linear.weight)
+        self.alpha_q  = res["alpha"]   # [N, n_blocks] CPU float32
+        self.bias_q   = res["bias"]    # [N, n_blocks] CPU long
+ 
+        del res
         torch.cuda.empty_cache()
     def calibrate_Hessian_Hadamard(self, data_loader, device, H_block):
             # res = reconstruct_layer_hadamard_v10(
@@ -8252,20 +8498,40 @@ class QuantConv1dFP(nn.Module):
         W_reconstructed = self._reconstruct(alpha, e, m, sign)
         self._store_weight_q(W_reconstructed)
  
+    # def calibrate_Hessian_scaled(self, data_loader, device, H_block):
+    #     weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
+    #         self.linear,          # or self.conv / self.conv1d
+    #         H_block,
+    #         self.block_size,
+    #         self.e_bits,
+    #         self.m_bits,
+    #         self.e_bits_scale,
+    #         self.m_bits_scale,
+    #         device=device)
+    #     self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
+    #     del weight_q
+    #     torch.cuda.empty_cache()
     def calibrate_Hessian_scaled(self, data_loader, device, H_block):
-        weight_q = reconstruct_layer_fp_blockdiag_scaled_v5(
-            self.linear,          # or self.conv / self.conv1d
+        """
+        Adaptive mesh (v5 scaled) calibration.
+        reconstruct_layer_fp_blockdiag_scaled_v5 now returns a dict.
+        """
+        res = reconstruct_layer_fp_blockdiag_scaled_v5(
+            self.conv1d,
             H_block,
             self.block_size,
             self.e_bits,
             self.m_bits,
             self.e_bits_scale,
             self.m_bits_scale,
-            device=device)
-        self.weight_q = weight_q.view_as(self.linear.weight)  # or .conv.weight / .conv1d.weight
-        del weight_q
-        torch.cuda.empty_cache()
+            device=device,
+        )
+        self.weight_q = res["weight_q"].view_as(self.linear.weight)
+        self.alpha_q  = res["alpha"]   # [N, n_blocks] CPU float32
+        self.bias_q   = res["bias"]    # [N, n_blocks] CPU long
  
+        del res
+        torch.cuda.empty_cache()
     def calibrate_Hessian_Hadamard(self, data_loader, device, H_block):
         original_weight      = self.conv1d.weight.data
         self.conv1d.weight.data = self._get_weight_standard_layout()
@@ -8793,55 +9059,286 @@ def quantize_model_fp(model,
 
 
 
-def smooth_layer(layer, alpha=0.5):
+# def smooth_layer(layer, alpha=0.5):
+#     """
+#     Migrate outliers from weights to the preceding activation scale.
+#     alpha controls the migration strength — 0.5 is the standard default.
+#     layer.weight is (out, in) — we scale input channels.
+#     """
+#     W = layer.weight.data                          # (out, in)
+    
+#     # Per input-channel max absolute value
+#     w_scale = W.abs().max(dim=0).values            # (in,)
+#     w_scale = w_scale.clamp(min=1e-8)
+    
+#     # Smooth scale — alpha controls balance between W and X
+#     smooth_scale = w_scale.pow(alpha)              # (in,)
+    
+#     # Absorb into weight — divide each input channel by smooth_scale
+#     W_smoothed = W / smooth_scale.unsqueeze(0)     # (out, in)
+#     layer.weight.data = W_smoothed
+    
+#     return smooth_scale  # caller absorbs this into preceding LayerNorm
+
+
+# def apply_smoothquant(model):
+#     """
+#     Apply SmoothQuant channel migration to BLOOM's linear layers.
+#     For each transformer block, smooth the QKV/dense/MLP weights
+#     and absorb the scale into the preceding LayerNorm.
+#     """
+#     for i, block in enumerate(model.transformer.h):
+#         # --- Attention input LayerNorm → QKV projection ---
+#         ln   = block.input_layernorm
+#         qkv  = block.self_attention.query_key_value
+#         scale = smooth_layer(qkv, alpha=0.5)
+#         # Absorb into LayerNorm weight and bias
+#         ln.weight.data *= scale
+#         if ln.bias is not None:
+#             ln.bias.data *= scale
+
+#         # --- Post-attention LayerNorm → MLP ---
+#         ln2  = block.post_attention_layernorm
+#         fc1  = block.mlp.dense_h_to_4h
+#         scale2 = smooth_layer(fc1, alpha=0.5)
+#         ln2.weight.data *= scale2
+#         if ln2.bias is not None:
+#             ln2.bias.data *= scale2
+
+#         # dense (attention output projection) takes post-attention hidden states
+#         # These don't have a preceding LayerNorm to absorb into,
+#         # so we skip or use a smaller alpha
+#         # smooth_layer(block.self_attention.dense, alpha=0.3)
+
+#     return model
+
+def collect_activation_scales(model, calib_loader, device, num_batches=4):
     """
-    Migrate outliers from weights to the preceding activation scale.
-    alpha controls the migration strength — 0.5 is the standard default.
-    layer.weight is (out, in) — we scale input channels.
+    Collect per-channel max activation magnitude for each linear layer
+    by running calibration data through the model with forward hooks.
+    Returns dict: layer_name -> per-input-channel max abs activation [in_features]
     """
-    W = layer.weight.data                          # (out, in)
-    
-    # Per input-channel max absolute value
-    w_scale = W.abs().max(dim=0).values            # (in,)
-    w_scale = w_scale.clamp(min=1e-8)
-    
-    # Smooth scale — alpha controls balance between W and X
-    smooth_scale = w_scale.pow(alpha)              # (in,)
-    
-    # Absorb into weight — divide each input channel by smooth_scale
-    W_smoothed = W / smooth_scale.unsqueeze(0)     # (out, in)
+    act_scales = {}
+    hooks = []
+
+    def make_hook(name):
+        def hook(module, inp, out):
+            x = inp[0].detach()                      # (B, seq, in) or (B, in)
+            x_flat = x.reshape(-1, x.shape[-1])      # (N, in)
+            channel_max = x_flat.abs().max(dim=0).values  # (in,)
+            if name not in act_scales:
+                act_scales[name] = channel_max
+            else:
+                act_scales[name] = torch.maximum(act_scales[name], channel_max)
+        return hook
+
+    # Register hooks on the layers we want to smooth
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            hooks.append(module.register_forward_hook(make_hook(name)))
+
+    model.eval()
+    with torch.no_grad():
+        for i, (x, _) in enumerate(calib_loader):
+            x = x.to(device)
+            model(x)
+            if i + 1 >= num_batches:
+                break
+
+    for h in hooks:
+        h.remove()
+
+    return act_scales
+
+
+def smooth_layer(layer, act_scale, alpha=0.5):
+    """
+    Full SmoothQuant scale: s = act_scale^alpha / w_scale^(1-alpha)
+    act_scale: per-input-channel max activation [in_features]
+    """
+    W = layer.weight.data                              # (out, in)
+    w_scale = W.abs().max(dim=0).values.clamp(min=1e-8)  # (in,)
+    act_scale = act_scale.clamp(min=1e-8)
+
+    # Joint scale balancing activations and weights
+    smooth_scale = (act_scale.pow(alpha) /
+                    w_scale.pow(1 - alpha))            # (in,)
+
+    W_smoothed = W / smooth_scale.unsqueeze(0)
     layer.weight.data = W_smoothed
-    
-    return smooth_scale  # caller absorbs this into preceding LayerNorm
+    return smooth_scale
 
 
-def apply_smoothquant(model):
+def apply_smoothquant(model, calib_loader, device, alpha=0.5):
     """
-    Apply SmoothQuant channel migration to BLOOM's linear layers.
-    For each transformer block, smooth the QKV/dense/MLP weights
-    and absorb the scale into the preceding LayerNorm.
+    Full SmoothQuant using both activation and weight statistics.
     """
+    # Step 1 — collect activation scales from calibration data
+    act_scales = collect_activation_scales(model, calib_loader, device)
+
+    # Step 2 — apply smoothing block by block
     for i, block in enumerate(model.transformer.h):
-        # --- Attention input LayerNorm → QKV projection ---
-        ln   = block.input_layernorm
-        qkv  = block.self_attention.query_key_value
-        scale = smooth_layer(qkv, alpha=0.5)
-        # Absorb into LayerNorm weight and bias
-        ln.weight.data *= scale
-        if ln.bias is not None:
-            ln.bias.data *= scale
 
-        # --- Post-attention LayerNorm → MLP ---
-        ln2  = block.post_attention_layernorm
-        fc1  = block.mlp.dense_h_to_4h
-        scale2 = smooth_layer(fc1, alpha=0.5)
-        ln2.weight.data *= scale2
-        if ln2.bias is not None:
-            ln2.bias.data *= scale2
+        # QKV projection
+        qkv_name = f"transformer.h.{i}.self_attention.query_key_value"
+        if qkv_name in act_scales:
+            ln  = block.input_layernorm
+            qkv = block.self_attention.query_key_value
+            scale = smooth_layer(qkv, act_scales[qkv_name], alpha)
+            ln.weight.data *= scale
+            if ln.bias is not None:
+                ln.bias.data *= scale
 
-        # dense (attention output projection) takes post-attention hidden states
-        # These don't have a preceding LayerNorm to absorb into,
-        # so we skip or use a smaller alpha
-        # smooth_layer(block.self_attention.dense, alpha=0.3)
+        # MLP first projection
+        fc1_name = f"transformer.h.{i}.mlp.dense_h_to_4h"
+        if fc1_name in act_scales:
+            ln2 = block.post_attention_layernorm
+            fc1 = block.mlp.dense_h_to_4h
+            scale2 = smooth_layer(fc1, act_scales[fc1_name], alpha)
+            ln2.weight.data *= scale2
+            if ln2.bias is not None:
+                ln2.bias.data *= scale2
 
     return model
+
+
+import torch
+import json
+from pathlib import Path
+
+def save_for_trt_export(
+    model,               # your nn.Module with quantized weights
+    layer_scales,        # dict: layer_name -> alpha_eff tensor (per-block)
+    layer_biases,        # dict: layer_name -> original bias tensor
+    block_size,
+    save_dir,
+):
+    """
+    Absorb custom FP4 bias into scale, then save weights + effective scales
+    in a format ready for ONNX QDQ injection.
+
+    layer_scales[name] : shape [num_blocks]  (your alpha, per block)
+    layer_biases[name] : shape [num_blocks]  (your custom exponent bias)
+    """
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Standard FP4 E2M1 decode table (fixed bias = 1)
+    FP4_STD = torch.tensor(
+        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+        dtype=torch.float32,
+    )
+
+    weights_out = {}
+    scales_out  = {}
+    masks_out   = {}
+    meta_layers = {}
+
+    for name, param in model.named_parameters():
+        if name not in layer_scales:
+            # Non-quantized layer — save as-is in FP16
+            weights_out[name] = param.data.half()
+            continue
+
+        alpha  = layer_scales[name].float()   # [num_blocks]
+        bias   = layer_biases[name].long()    # [num_blocks]
+
+        W = param.data.float()
+        shape = W.shape
+        W_flat = W.view(-1)
+        n_blocks = (W_flat.numel() + block_size - 1) // block_size
+
+        alpha_eff_per_element = torch.zeros_like(W_flat)
+
+        for b in range(n_blocks):
+            start = b * block_size
+            end   = min(start + block_size, W_flat.numel())
+            block = W_flat[start:end]
+
+            a     = alpha[b]
+            bval  = bias[b].item()
+
+            # Decode table with custom bias: 2^(exp - custom_bias + 1) × mantissa
+            # For E2M1: exponents are 0,1,2,3 → values shift by 2^(custom_bias - std_bias)
+            bias_shift = 2.0 ** (bval - 1)   # std bias = 1
+            fp4_custom = FP4_STD * bias_shift  # custom decode table
+
+            # Per-element ratio: how much did the custom bias inflate each value?
+            # Find nearest fp4_custom value for each weight
+            abs_block = block.abs()
+            sign_block = block.sign()
+
+            dists  = (abs_block.unsqueeze(1) - fp4_custom.unsqueeze(0)).abs()
+            idx    = dists.argmin(dim=1)
+
+            custom_decoded = fp4_custom[idx]          # what your method reconstructs
+            std_decoded    = FP4_STD[idx]             # what standard FP4 gives
+
+            # Ratio is 0/0 where weight=0 — handle safely
+            ratio = torch.where(
+                std_decoded.abs() > 1e-8,
+                custom_decoded / std_decoded,
+                torch.ones_like(custom_decoded),
+            )
+
+            # Absorbed scale: scalar per block (take mean of per-element ratios)
+            alpha_eff = a * ratio.mean()
+            alpha_eff_per_element[start:end] = alpha_eff
+
+        # Reconstruct weights in FP16 using absorbed scale
+        # W_reconstructed = alpha_eff_per_element * sign * std_fp4_value
+        abs_W = W_flat.abs()
+        sign_W = W_flat.sign()
+        dists = (abs_W.unsqueeze(1) - FP4_STD.unsqueeze(0)).abs()
+        idx   = dists.argmin(dim=1)
+        W_std_decoded = FP4_STD[idx] * sign_W  # standard FP4 reconstruction
+
+        W_reconstructed = alpha_eff_per_element * W_std_decoded
+        weights_out[name] = W_reconstructed.view(shape).half()
+
+        # Per-block alpha_eff for QDQ scale nodes
+        block_scales = []
+        for b in range(n_blocks):
+            start = b * block_size
+            end   = min(start + block_size, W_flat.numel())
+            block_scales.append(alpha_eff_per_element[start:end].mean().item())
+        scales_out[name] = torch.tensor(block_scales, dtype=torch.float32)
+
+        # Sparsity mask
+        masks_out[name] = (param.data != 0)
+
+        meta_layers[name] = {
+            "shape":      list(shape),
+            "n_blocks":   n_blocks,
+            "block_size": block_size,
+            "sparsity":   float((param.data == 0).float().mean()),
+        }
+
+    torch.save(weights_out, save_dir / "weights_fp16.pt")
+    torch.save(scales_out,  save_dir / "scales.pt")
+    torch.save(masks_out,   save_dir / "sparsity_masks.pt")
+
+    metadata = {
+        "block_size":   block_size,
+        "format":       "fp4_bias_absorbed",
+        "layers":       meta_layers,
+    }
+    with open(save_dir / "metadata.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"Saved to {save_dir}/")
+    print(f"  weights_fp16.pt     — {len(weights_out)} layers")
+    print(f"  scales.pt           — {len(scales_out)} quantized layers")
+    print(f"  sparsity_masks.pt   — {len(masks_out)} layers")
+    print(f"  metadata.json       — block_size={block_size}")
+
+
+def load_for_inspection(save_dir):
+    """Load back and verify before export."""
+    save_dir = Path(save_dir)
+    weights = torch.load(save_dir / "weights_fp16.pt", weights_only=True)
+    scales  = torch.load(save_dir / "scales.pt",       weights_only=True)
+    masks   = torch.load(save_dir / "sparsity_masks.pt", weights_only=True)
+    with open(save_dir / "metadata.json") as f:
+        meta = json.load(f)
+    return weights, scales, masks, meta

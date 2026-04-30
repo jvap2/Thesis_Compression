@@ -12,12 +12,12 @@ import math
 bitwidth = 4
 e_bits = 2
 m_bits = 1
-e_scale_bits = 8
-m_scale_bits = 0
-blocksize = 64
+e_scale_bits = 4
+m_scale_bits = 3
+blocksize = 128
 batch_size = 8
 from huggingface_hub import login
-
+login(token="REMOVED")
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -28,6 +28,7 @@ OPT_MODELS = {
     "6.7b": "facebook/opt-6.7b",
     "13b": "facebook/opt-13b",
     "llama-1b":"meta-llama/Llama-3.2-1B",
+    "llama-7b":"meta-llama/Llama-2-7b-hf",
         # GPT-2 family — very lightweight, good sanity-check baseline
     # Papers like GPTQ and LLM-FP4 use these as small-scale references
     "gpt2":      "gpt2",           # 117M
@@ -161,6 +162,52 @@ def compute_standard_ppl(model, tokenizer, dataset, stride=512, device="cuda"):
         return float('inf')
     return math.exp(nll_sum / n_tokens)
 
+
+
+def compute_ppl_gptq_style(model, tokenizer, dataset, 
+                            seq_len=2048, device="cuda"):
+    """
+    Matches the GPTQ paper evaluation protocol:
+    - Concatenate all text with newlines
+    - Split into NON-OVERLAPPING chunks of seq_len tokens
+    - Average NLL across all tokens, then exponentiate
+    - seq_len=2048 for OPT/LLaMA, matches GPTQ paper
+    
+    Note: this gives slightly HIGHER (worse) PPL than the sliding
+    window approach because there is no overlap context.
+    Use this function when comparing to GPTQ, AWQ, LLM-FP4 numbers.
+    """
+    model.eval()
+
+    # Tokenize the full corpus as one string
+    full_text = "\n\n".join(dataset["text"])
+    encodings  = tokenizer(full_text, return_tensors="pt",
+                           add_special_tokens=False)
+    input_ids  = encodings.input_ids.to(device)   # [1, total_tokens]
+    total_tokens = input_ids.size(1)
+
+    # Clip to a multiple of seq_len (GPTQ does this)
+    n_chunks = total_tokens // seq_len
+    input_ids = input_ids[:, :n_chunks * seq_len]  # [1, n_chunks*seq_len]
+
+    # Reshape into non-overlapping chunks [n_chunks, seq_len]
+    input_ids = input_ids.view(n_chunks, seq_len)
+
+    nll_sum = 0.0
+    n_tokens = 0
+
+    for chunk in input_ids:
+        chunk = chunk.unsqueeze(0)                # [1, seq_len]
+        with torch.no_grad():
+            outputs = model(chunk, labels=chunk.clone())
+            # outputs.loss is mean NLL over seq_len-1 tokens
+            # (model shifts labels internally)
+            nll_sum  += outputs.loss.item() * (seq_len - 1)
+            n_tokens += (seq_len - 1)
+
+    ppl = math.exp(nll_sum / n_tokens)
+    return ppl
+
 def collate_fn(batch, tokenizer, seq_len=512, device="cuda"):
     texts = [item["text"] for item in batch if len(item["text"].strip()) > 0]
     
@@ -190,10 +237,11 @@ def get_llm_dataloader(dataset, tokenizer, batch_size=8):
         collate_fn=lambda batch: collate_fn(batch, tokenizer)
     )
 res_file = "quant_res.csv"
-model_name = OPT_MODELS["1.3b"]
+model_name = OPT_MODELS["125m"]
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype=torch.float16,
@@ -213,114 +261,127 @@ data ="wikitext-2-raw-v1"
 dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
 ppl_fp32 = compute_standard_ppl(model, tokenizer, dataset)
+ppl_fp32_gptq = compute_ppl_gptq_style(model, tokenizer, dataset, 
+                                      seq_len=2048)
 print("FP32 PPL:", ppl_fp32)
-calib_loader = get_llm_dataloader(dataset, tokenizer, batch_size=batch_size)
-hadamard = True
-import gc
-torch.cuda.empty_cache()
-gc.collect()
-if "bloom" in model_name:
-    print("Applying SmoothQuant...")
-    model = apply_smoothquant(model)
-    # Run this BEFORE quantization, AFTER smoothing
-    # to confirm smoothing actually changed the weight distribution
-    for name, module in model.named_modules():
-        if name == "transformer.h.0.self_attention.query_key_value":
-            w = module.weight.data
-            print(f"=== After smoothing, before quantization ===")
-            print(f"weight shape: {w.shape}")
-            print(f"weight max:   {w.abs().max():.6f}")
-            print(f"weight mean:  {w.abs().mean():.6f}")
-            print(f"weight std:   {w.std():.6f}")
-            print(f"values > 0.1: {(w.abs() > 0.1).float().mean():.4f}")
-            print(f"values > 0.5: {(w.abs() > 0.5).float().mean():.4f}")
-            print(f"values > 1.0: {(w.abs() > 1.0).float().mean():.4f}")
-            print(f"values > 2.0: {(w.abs() > 2.0).float().mean():.4f}")
-            break
-
-    # Also check the LayerNorm to confirm scale was absorbed
-    for name, module in model.named_modules():
-        if name == "transformer.h.0.input_layernorm":
-            print(f"\n=== input_layernorm after smoothing ===")
-            print(f"weight max:  {module.weight.data.abs().max():.4f}")
-            print(f"weight mean: {module.weight.data.abs().mean():.4f}")
-            break
-    # Before quantization, after smoothing
-    for name, module in model.named_modules():
-        if name == "transformer.h.0.self_attention.query_key_value":
-            print(type(module))           # should be nn.Linear, NOT QuantLinearFP
-            print(module.weight.shape)    # should exist directly on module
-            break
-    test_input = torch.randint(0, 1000, (1, 32)).to(device)
-    # Print BLOOM block structure to see exact attribute names
-    # Print full BLOOM block 0 structure
-    for name, module in model.named_modules():
-        if name.startswith("transformer.h.0") and not any(
-            name.startswith(f"transformer.h.0.{x}.")
-            for x in ["self_attention", "mlp"]
-        ):
-            print(f"{name}: {type(module).__name__}")
-    with torch.no_grad():
-        out_orig  = model(test_input, labels=test_input)
-quant_model = quantize_model_fp(model,calib_loader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap= (not hadamard), use_forward=False, Hadamard=hadamard)
-
-if "bloom" in model_name:
-    # After quantization
-    for name, module in quant_model.named_modules():
-        if name == "transformer.h.0.self_attention.query_key_value":
-            print(f"\n=== Quantized weight stats ===")
-            print(f"weight_q max:  {module.weight_q.abs().max():.6f}")
-            print(f"weight_q mean: {module.weight_q.abs().mean():.6f}")
-            
-            # Direct comparison
-            w_orig  = module.linear.weight.data
-            w_quant = module.weight_q
-            
-            abs_err = (w_orig - w_quant).abs()
-            rel_err = abs_err / w_orig.abs().clamp(min=1e-8)
-            
-            print(f"abs error max:  {abs_err.max():.6f}")
-            print(f"abs error mean: {abs_err.mean():.6f}")
-            print(f"rel error mean: {rel_err.mean():.6f}")
-            
-            # Check if outliers remain after smoothing
-            print(f"weight_q values > 0.5: {(w_quant.abs() > 0.5).float().mean():.4f}")
-            print(f"weight_q values > 1.0: {(w_quant.abs() > 1.0).float().mean():.4f}")
-            break
-    for name, module in quant_model.named_modules():
-        if name == "transformer.h.0.self_attention.query_key_value":
-            print(f"module.linear.weight max: {module.linear.weight.abs().max():.4f}")
-            print(f"module.weight_q max:      {module.weight_q.abs().max():.4f}")
-            
-            x_test = torch.randn(1, 1024).to(device)
-            
-            # What the original linear would produce
-            out_linear = F.linear(x_test, module.linear.weight, module.linear.bias)
-            # What weight_q produces  
-            out_quant  = F.linear(x_test, module.weight_q,      module.linear.bias)
-            # What QuantLinearFP.forward actually produces
-            out_module = module(x_test)
-            
-            print(f"out_linear max: {out_linear.abs().max():.4f}")
-            print(f"out_quant max:  {out_quant.abs().max():.4f}")
-            print(f"out_module max: {out_module.abs().max():.4f}")
-            break
-    for name, module in quant_model.named_modules():
-        if name == "transformer.h.0.self_attention.query_key_value":
-            print(f"weight_q is None: {module.weight_q is None}")
-            print(f"weight_q shape:   {module.weight_q.shape if module.weight_q is not None else 'N/A'}")
-    with torch.no_grad():
-        out_quant = quant_model(test_input, labels=test_input)
-        
-    print(f"Original loss:  {out_orig.loss:.4f}  (PPL={math.exp(out_orig.loss):.2f})")
-    print(f"Quantized loss: {out_quant.loss:.4f} (PPL={math.exp(out_quant.loss):.2f})")
-
-    del model
+print("FP32 GPTQ PPL:", ppl_fp32_gptq)
+ppl_fp4 = float('inf')  # default to inf if quantization fails
+ppl_fp4_gptq = float('inf')
+try:
+    calib_loader = get_llm_dataloader(dataset, tokenizer, batch_size=batch_size)
+    hadamard = False
+    import gc
     torch.cuda.empty_cache()
-ppl_fp4  = compute_standard_ppl(quant_model, tokenizer, dataset)
+    gc.collect()
+    if "bloom" in model_name:
+        print("Applying SmoothQuant...")
+        model = apply_smoothquant(model, calib_loader, device=device)
+        # Run this BEFORE quantization, AFTER smoothing
+        # to confirm smoothing actually changed the weight distribution
+        for name, module in model.named_modules():
+            if name == "transformer.h.0.self_attention.query_key_value":
+                w = module.weight.data
+                print(f"=== After smoothing, before quantization ===")
+                print(f"weight shape: {w.shape}")
+                print(f"weight max:   {w.abs().max():.6f}")
+                print(f"weight mean:  {w.abs().mean():.6f}")
+                print(f"weight std:   {w.std():.6f}")
+                print(f"values > 0.1: {(w.abs() > 0.1).float().mean():.4f}")
+                print(f"values > 0.5: {(w.abs() > 0.5).float().mean():.4f}")
+                print(f"values > 1.0: {(w.abs() > 1.0).float().mean():.4f}")
+                print(f"values > 2.0: {(w.abs() > 2.0).float().mean():.4f}")
+                break
 
+        # Also check the LayerNorm to confirm scale was absorbed
+        for name, module in model.named_modules():
+            if name == "transformer.h.0.input_layernorm":
+                print(f"\n=== input_layernorm after smoothing ===")
+                print(f"weight max:  {module.weight.data.abs().max():.4f}")
+                print(f"weight mean: {module.weight.data.abs().mean():.4f}")
+                break
+        # Before quantization, after smoothing
+        for name, module in model.named_modules():
+            if name == "transformer.h.0.self_attention.query_key_value":
+                print(type(module))           # should be nn.Linear, NOT QuantLinearFP
+                print(module.weight.shape)    # should exist directly on module
+                break
+        test_input = torch.randint(0, 1000, (1, 32)).to(device)
+        # Print BLOOM block structure to see exact attribute names
+        # Print full BLOOM block 0 structure
+        for name, module in model.named_modules():
+            if name.startswith("transformer.h.0") and not any(
+                name.startswith(f"transformer.h.0.{x}.")
+                for x in ["self_attention", "mlp"]
+            ):
+                print(f"{name}: {type(module).__name__}")
+        with torch.no_grad():
+            out_orig  = model(test_input, labels=test_input)
+    quant_model = quantize_model_fp(model,calib_loader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap= (not hadamard), use_forward=False, Hadamard=hadamard)
 
-print("FP4  PPL:", ppl_fp4)
+    if "bloom" in model_name:
+        # After quantization
+        for name, module in quant_model.named_modules():
+            if name == "transformer.h.0.self_attention.query_key_value":
+                print(f"\n=== Quantized weight stats ===")
+                print(f"weight_q max:  {module.weight_q.abs().max():.6f}")
+                print(f"weight_q mean: {module.weight_q.abs().mean():.6f}")
+                
+                # Direct comparison
+                w_orig  = module.linear.weight.data
+                w_quant = module.weight_q
+                
+                abs_err = (w_orig - w_quant).abs()
+                rel_err = abs_err / w_orig.abs().clamp(min=1e-8)
+                
+                print(f"abs error max:  {abs_err.max():.6f}")
+                print(f"abs error mean: {abs_err.mean():.6f}")
+                print(f"rel error mean: {rel_err.mean():.6f}")
+                
+                # Check if outliers remain after smoothing
+                print(f"weight_q values > 0.5: {(w_quant.abs() > 0.5).float().mean():.4f}")
+                print(f"weight_q values > 1.0: {(w_quant.abs() > 1.0).float().mean():.4f}")
+                break
+        for name, module in quant_model.named_modules():
+            if name == "transformer.h.0.self_attention.query_key_value":
+                print(f"module.linear.weight max: {module.linear.weight.abs().max():.4f}")
+                print(f"module.weight_q max:      {module.weight_q.abs().max():.4f}")
+                
+                x_test = torch.randn(1, 1024).to(device)
+                
+                # What the original linear would produce
+                out_linear = F.linear(x_test, module.linear.weight, module.linear.bias)
+                # What weight_q produces  
+                out_quant  = F.linear(x_test, module.weight_q,      module.linear.bias)
+                # What QuantLinearFP.forward actually produces
+                out_module = module(x_test)
+                
+                print(f"out_linear max: {out_linear.abs().max():.4f}")
+                print(f"out_quant max:  {out_quant.abs().max():.4f}")
+                print(f"out_module max: {out_module.abs().max():.4f}")
+                break
+        for name, module in quant_model.named_modules():
+            if name == "transformer.h.0.self_attention.query_key_value":
+                print(f"weight_q is None: {module.weight_q is None}")
+                print(f"weight_q shape:   {module.weight_q.shape if module.weight_q is not None else 'N/A'}")
+        with torch.no_grad():
+            out_quant = quant_model(test_input, labels=test_input)
+            
+        print(f"Original loss:  {out_orig.loss:.4f}  (PPL={math.exp(out_orig.loss):.2f})")
+        print(f"Quantized loss: {out_quant.loss:.4f} (PPL={math.exp(out_quant.loss):.2f})")
+
+        del model
+        torch.cuda.empty_cache()
+    ppl_fp4  = compute_standard_ppl(quant_model, tokenizer, dataset)
+    ppl_fp4_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
+                                        seq_len=2048)
+
+    print("FP4  PPL:", ppl_fp4)
+    print("FP4 GPTQ PPL:", ppl_fp4_gptq)
+except torch.cuda.OutOfMemoryError:
+    print("  OOM during quantization — saving FP32 baseline only.")
+    print("  FP4 columns will be inf in the CSV.")
+    torch.cuda.empty_cache()
+    gc.collect()
 
 import pandas as pd
 ## The file is already created, so we will append to it
