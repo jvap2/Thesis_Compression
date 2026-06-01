@@ -53,25 +53,26 @@ def _import_or_stub(name: str):
 
 # ---- LeNet5 ---------------------------------------------------------------
 try:
-    from models.lenet import create_lenet5          # adjust import path
+    from rcnet import create_lenet5
 except ImportError:
     create_lenet5 = _import_or_stub("create_lenet5")
 
 # ---- DenseNet40 -----------------------------------------------------------
 try:
-    from models.densenet import create_densenet40   # adjust import path
+    from densenet import create_densenet40
 except ImportError:
     create_densenet40 = _import_or_stub("create_densenet40")
 
-# ---- ResNet32 -------------------------------------------------------------
+# ---- ResNet32 / ResNet56 --------------------------------------------------
 try:
-    from models.resnet import resnet32              # adjust import path
+    from resnet import resnet32, resnet56
 except ImportError:
     resnet32 = _import_or_stub("resnet32")
+    resnet56 = _import_or_stub("resnet56")
 
 # ---- VGG19 ----------------------------------------------------------------
 try:
-    from models.vgg import vgg19                    # adjust import path
+    from models import vgg19
 except ImportError:
     vgg19 = _import_or_stub("vgg19")
 
@@ -79,6 +80,77 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Inline definitions for models with no external dependency
 # ---------------------------------------------------------------------------
+
+import torch.nn.functional as _F
+
+class _LambdaLayer(nn.Module):
+    def __init__(self, lambd):
+        super().__init__()
+        self.lambd = lambd
+    def forward(self, x):
+        return self.lambd(x)
+
+
+class _BasicBlockLambda(nn.Module):
+    """BasicBlock matching the original saved ResNet56: LambdaLayer shortcuts, no bn3."""
+    expansion = 1
+
+    def __init__(self, in_planes, planes, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_planes, planes, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.conv2 = nn.Conv2d(planes, planes, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.shortcut = nn.Sequential()  # identity — no params
+        if stride != 1 or in_planes != planes:
+            _p = planes // 4
+            self.shortcut = _LambdaLayer(
+                lambda x, p=_p: _F.pad(x[:, :, ::2, ::2], (0, 0, 0, 0, p, p))
+            )
+
+    def forward(self, x):
+        out = _F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = out + self.shortcut(x)
+        return _F.relu(out)
+
+
+def _resnet56_cifar10():
+    """
+    ResNet56 constructor that matches the saved Best_Results_HPO weights.
+    Uses bn1 naming for the initial BN and LambdaLayer (no-param) shortcuts.
+    """
+    class _ResNet56(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv1 = nn.Conv2d(3, 16, 3, stride=1, padding=1, bias=False)
+            self.bn1 = nn.BatchNorm2d(16)
+            in_p = 16
+            l1, l2, l3 = [], [], []
+            for _ in range(9):
+                l1.append(_BasicBlockLambda(in_p, 16, stride=1)); in_p = 16
+            l2.append(_BasicBlockLambda(in_p, 32, stride=2)); in_p = 32
+            for _ in range(8):
+                l2.append(_BasicBlockLambda(in_p, 32, stride=1))
+            l3.append(_BasicBlockLambda(in_p, 64, stride=2)); in_p = 64
+            for _ in range(8):
+                l3.append(_BasicBlockLambda(in_p, 64, stride=1))
+            self.layer1 = nn.Sequential(*l1)
+            self.layer2 = nn.Sequential(*l2)
+            self.layer3 = nn.Sequential(*l3)
+            self.linear = nn.Linear(64, 10)
+
+        def forward(self, x):
+            out = _F.relu(self.bn1(self.conv1(x)))
+            out = self.layer1(out)
+            out = self.layer2(out)
+            out = self.layer3(out)
+            out = _F.avg_pool2d(out, out.size(3))
+            out = out.view(out.size(0), -1)
+            return self.linear(out)
+
+    return _ResNet56()
+
 
 def _lenet300():
     return nn.Sequential(
@@ -142,18 +214,16 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         num_classes=10,
     ),
 
-    # --- ResNet56 / CIFAR10 (pretrained from hub — no saved_dict needed) --
+    # --- ResNet56 / CIFAR10 -----------------------------------------------
+    # Uses inline _resnet56_cifar10() because the saved .pth was trained with
+    # LambdaLayer shortcuts (no-param) and bn1 naming for the initial BN,
+    # while resnet.py's resnet56() was later modified to use projection shortcuts.
     "ResNet56": ModelEntry(
-        constructor=lambda: torch.hub.load(
-            "chenyaofo/pytorch-cifar-models",
-            "cifar10_resnet56",
-            pretrained=True,
-        ),
-        saved_dict="",           # empty = skip state_dict load
+        constructor=_resnet56_cifar10,
+        saved_dict="Best_Results_HPO/ResNet56/best_2025-11-16_18-44-00_CIFAR10_ResNet56.pth",
         dataset="cifar10",
         input_shape=(3, 32, 32),
         num_classes=10,
-        notes="Loaded from torch.hub — no local .pth required",
     ),
 
     # --- ResNet32 / CIFAR10 -----------------------------------------------
@@ -165,13 +235,24 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         num_classes=10,
     ),
 
-    # --- ResNet32 / CIFAR100 ----------------------------------------------
-    "ResNet32/CIFAR100": ModelEntry(
+    # --- ResNet32 / CIFAR100 (86% sparsity) -------------------------------
+    "ResNet32/CIFAR100_86": ModelEntry(
         constructor=lambda: resnet32(num_classes=100),
         saved_dict="Best_Results_HPO/ResNet32/CIFAR-100/86_Sparsity/best_2025-12-03_10-14-41_cifar100_ResNet_32.pth",
         dataset="cifar100",
         input_shape=(3, 32, 32),
         num_classes=100,
+        notes="86% sparsity variant",
+    ),
+
+    # --- ResNet32 / CIFAR100 (85% sparsity) -------------------------------
+    "ResNet32/CIFAR100_85": ModelEntry(
+        constructor=lambda: resnet32(num_classes=100),
+        saved_dict="Best_Results_HPO/ResNet32/CIFAR-100/85_Sparsity/best_2025-12-01_21-55-23_cifar100_ResNet_32.pth",
+        dataset="cifar100",
+        input_shape=(3, 32, 32),
+        num_classes=100,
+        notes="85% sparsity variant",
     ),
 
     # --- ResNet32 / TinyImageNet ------------------------------------------
@@ -192,13 +273,24 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         num_classes=10,
     ),
 
-    # --- VGG19 / CIFAR100 -------------------------------------------------
-    "VGG19/CIFAR100": ModelEntry(
+    # --- VGG19 / CIFAR100 (98% sparsity) ----------------------------------
+    "VGG19/CIFAR100_98": ModelEntry(
         constructor=lambda: vgg19(dataset="cifar100"),
         saved_dict="Best_Results_HPO/VGG-19/CIFAR-100/98_sparsity/best_2025-11-23_20-24-12_cifar100_vgg19.pth",
         dataset="cifar100",
         input_shape=(3, 32, 32),
         num_classes=100,
+        notes="98% sparsity variant",
+    ),
+
+    # --- VGG19 / CIFAR100 (90% sparsity) ----------------------------------
+    "VGG19/CIFAR100_90": ModelEntry(
+        constructor=lambda: vgg19(dataset="cifar100"),
+        saved_dict="Best_Results_HPO/VGG-19/CIFAR-100/90_sparsity/best_2025-11-21_12-14-31_cifar100_vgg19.pth",
+        dataset="cifar100",
+        input_shape=(3, 32, 32),
+        num_classes=100,
+        notes="90% sparsity variant",
     ),
 
     # --- VGG19 / TinyImageNet ---------------------------------------------
@@ -208,6 +300,16 @@ MODEL_REGISTRY: dict[str, ModelEntry] = {
         dataset="tiny_imagenet",
         input_shape=(3, 64, 64),
         num_classes=200,
+    ),
+
+    # --- VGG19_Test / TinyImageNet ----------------------------------------
+    "VGG19_Test/TinyImageNet": ModelEntry(
+        constructor=lambda: vgg19(dataset="tiny_imagenet"),
+        saved_dict="Best_Results_HPO/VGG19_Test/best_2026-01-22_17-17-51_tiny_imagenet_vgg19.pth",
+        dataset="tiny_imagenet",
+        input_shape=(3, 64, 64),
+        num_classes=200,
+        notes="Test/experiment variant",
     ),
 }
 
