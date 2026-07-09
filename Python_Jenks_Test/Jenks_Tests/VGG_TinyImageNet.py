@@ -1,6 +1,9 @@
 from models import ResNet56
 import torch
-torch.set_float32_matmul_precision('highest')
+torch.set_float32_matmul_precision('high')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 from custom_optimizer import JenksSGD,PruneWeights, JenksSGD_Noise, SAM, JenksSGD_Test, PruneWeights_Test, train_one_step, Prune_Score_Mag
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -45,8 +48,10 @@ from models import ResNet56ETF, Args, AGD_init_weights, vgg19,vgg16,vgg11
 from utils import calculate_normalisation_params, RandomContrast, RandomGamma, TinyImageNetDataset
 print(torch.cuda.is_available())
 
-one_shot = True
+one_shot = True         # single prune at prune_epoch (target ~90% sparsity, no compounding)
 prune_ratio = 1
+import cuda_helpers
+cuda_helpers.OVER_PRUNE = 0.38    # pure Jenks (base ~90% sparsity at epoch 150); no extra cut -> max accuracy
 torch.cuda.empty_cache()
 # train_val_dataset = datasets.MNIST(root="./datasets/", train=True, download=True)
 # test_dataset = datasets.MNIST(root="./datasets/", train=False, download=True)
@@ -78,7 +83,7 @@ Color, and Brightness '''
 AGD = False
 TinyImageNet_PATH = "./datasets/tiny-imagenet-200/"
 depth =19
-datasets_name = 'tiny_imagenet'  # 'cifar10', 'cifar100', 'tiny_imagenet'
+datasets_name = 'cifar100'  # 'cifar10', 'cifar100', 'tiny_imagenet'
 if datasets_name == 'tiny_imagenet':
     num_classes = 200
     test = True
@@ -147,6 +152,7 @@ if datasets_name == 'cifar10':
                                 # transforms.RandomEqualize(),
                                 transforms.ToTensor(),
                                 normalize_4,
+                                transforms.RandomErasing(p=0.25),
                             ]))
     val_dataset = datasets.CIFAR10(CIFAR10_PATH, train=False,
                                     transform=transforms.Compose([
@@ -167,6 +173,7 @@ elif datasets_name == 'cifar100':
                                 transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
                                 transforms.ToTensor(),
                                 normalize_3,
+                                transforms.RandomErasing(p=0.25),
                             ]))
     val_dataset = datasets.CIFAR100(CIFAR100_PATH, train=False,
                                     transform=transforms.Compose([
@@ -174,11 +181,13 @@ elif datasets_name == 'cifar100':
                                         normalize_3
                                     ]))
 
-BATCH_SIZE = 200
-prune_epoch =  200
+BATCH_SIZE = 300
+prune_epoch =  280
 reset = False
-train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True)
+train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                            num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 # model_lenet5v1 = LeNet5V1()
 # model = create_RC56()
 
@@ -212,16 +221,21 @@ min_epochs = 300
 label_smoothing = 0.1
 loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 momentum = 0.99
-learning_rate = 1e-1
-weight_decay = 4e-4
+learning_rate = 4e-2
+weight_decay = 2e-4
 bias_weight_decay = 1e-4
-warmup_epochs = 6
+warmup_epochs = 10
 nestrov = False
 params = []
 bias_lr = True
 optimizer = init_lr_weight_decay(model, learning_rate, weight_decay,bias_weight_decay=bias_weight_decay, momentum=momentum, nestrov=nestrov, bias_lr=bias_lr, elem_bias = True, warmup_epochs=warmup_epochs, prune_epoch=prune_epoch)
 init_network(optimizer)
-EPOCHS = 300
+EPOCHS = 350
+# Enable MixUp/CutMix augmentation in train_one_step_prune_HPO; disable it for the
+# final 20 epochs so the model fine-tunes on clean labels (peak val accuracy).
+import custom_optimizer
+custom_optimizer.MIXUP = True
+custom_optimizer.MIXUP_OFF_EPOCH = EPOCHS - 20
 # scheduler = WarmupMultiStepLR(optimizer, milestones=[80, 120, 140], warmup_factor=0.1, warmup_iters=10, warmup_method="linear")
 adj = False
 schedule = True
@@ -242,6 +256,7 @@ two_schedulers = False
 # scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS, eta_min=1e-6)
 
 scheduler = WarmupAutoJenks(optimizer=optimizer,milestones=gsm_lr_boundaries, warmup_factor=1/3, prune_epochs=prune_epoch, reset=reset, warmup_iters=warmup_epochs)
+# scheduler = WarmupCosineLR(optimizer, final_lr=1e-4, final_iters=EPOCHS, warmup_factor=1/3, warmup_iters=warmup_epochs, warmup_method="linear")
 accuracy = Accuracy(task='multiclass', num_classes=num_classes)
 top5accuracy = MulticlassAccuracy(num_classes=num_classes, top_k=5)
  ## Check the number of parameters in the model vs number of trainiable parameters
@@ -327,8 +342,8 @@ total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print(f"Total trainable parameters in the model: {total_params}")
 total_pruned_params = sum(p.numel() for p in model.parameters() if p.dim() in [2, 4])
 print(f"Total prunebale parameters in the model: {total_pruned_params}")
-prune_epoch_list = [prune_epoch]
-prune_between = 25
+prune_epoch_list = [prune_epoch]         # single one-shot prune at prune_epoch (260)
+prune_between = 90                       # unused for one_shot (only epoch==prune_epoch triggers)
 # Run the training and validation loop
 weight_turnoff = True
 if not decl_ETF:
@@ -339,7 +354,7 @@ if not decl_ETF:
                     sparsity_filename=sparsity_filename, prune_filename=trace_filename, debug_filename=debug_filename,
                     jenks_filename=jenks_filename,
                     prune_count=prune_count, one_update=one_update, EPOCHS=EPOCHS, sparsity=sparsity,
-                    prune_epoch_list=prune_epoch_list, prune_epoch=prune_epoch, prune_between=5,
+                    prune_epoch_list=prune_epoch_list, prune_epoch=prune_epoch, prune_between=prune_between,
                     prune_ratio=prune_ratio, one_shot=one_shot, mask=mask,
                     mag_prune=mag_prune, bias_prune=bias_prune, kill_velocity=kill_velocity,
                     l2=l2, lambda_=lambda_, warmup_epochs=warmup_epochs, min_epochs=min_epochs, elem_bias = True, weight_reset=reset)

@@ -1,0 +1,51 @@
+# Compound: a PE register file with DECODE-AT-LOAD.
+#
+# The PE holds 4-bit codes' decoded values.  The LUT fires on the FILL (write)
+# from the global buffer — i.e. each operand is decoded ONCE when loaded into
+# the PE — and the MAC-side READ is a plain regfile read (value already decoded).
+# So LUT reads scale with operand LOADS (≪ MAC count, thanks to reuse), not with
+# MACs.  This is the architecture our "LUT is nearly free" claim assumes; the
+# decode-PER-MAC alternative (lut_fp4_mac) is the naive/pessimistic case.
+compound_components:
+  version: 0.3
+  classes:
+    - name: lut_regfile
+      attributes:
+        technology: "45nm"
+        depth: 64
+        width: 4
+        datawidth: 4
+      subcomponents:
+        - name: storage
+          class: regfile
+          attributes:
+            depth: 64
+            width: 4
+            datawidth: 4
+        - name: lut
+          class: regfile          # 16x8b codebook decode
+          attributes:
+            depth: 16
+            width: 8
+            datawidth: 8
+      actions:
+        - name: write              # FILL from global buffer: decode code, store value
+          subcomponents:
+            - name: storage
+              actions: [{name: write}]
+            - name: lut
+              actions: [{name: read}]
+        - name: read               # MAC reads decoded value: NO LUT
+          subcomponents:
+            - name: storage
+              actions: [{name: read}]
+        - name: update
+          subcomponents:
+            - name: storage
+              actions: [{name: update}]
+        - name: idle
+          subcomponents:
+            - name: storage
+              actions: [{name: idle}]
+            - name: lut
+              actions: [{name: idle}]

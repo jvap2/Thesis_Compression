@@ -16,10 +16,10 @@ This package implements a full FP4 W4A4 quantization pipeline for decoder-only L
 | FP4 A16 (weight-only, Hadamard) | 20.231 | 20.215 |
 | FP4 NVFP4 activations | ~8082 | ~8236 |
 | FP4 GF4 activations | 27.259 | 27.234 |
-| FP4 GF4 adaptive (new) | TBD | TBD |
-| FP4 GF4 residual (new) | TBD | TBD |
-| FP4 GF4 learned levels (new) | TBD | TBD |
-| FP4 H-SmoothQuant + GF4 (new) | TBD | TBD |
+| FP4 GF4 adaptive (new) | 20.362 | OOM (sliding only) |
+| FP4 GF4 residual (new) | 17.702 | 17.714 |
+| FP4 GF4 learned levels (new) | 21.128 | 21.212 |
+| FP4 H-SmoothQuant + GF4 (new) | 21.857 | OOM (sliding only) |
 
 Config: `e_bits=2, m_bits=1, e_bits_scale=4, m_bits_scale=3, block_size=16, batch_size=8`
 

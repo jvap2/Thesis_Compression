@@ -1,0 +1,42 @@
+{
+  "model": "meta-llama/Llama-3.2-3B",
+  "seqlen": 2048,
+  "block_size": 16,
+  "skipped_fp16": [
+    "down_proj"
+  ],
+  "config": {
+    "hidden_size": 3072,
+    "intermediate_size": 8192,
+    "num_hidden_layers": 28,
+    "vocab_size": 128256
+  },
+  "ppl": {
+    "A16 (W4A16)": 57.8864269256416,
+    "E2M1/NVFP4": 94.07094222336595,
+    "GF4 adaptive": 75.84193517077216,
+    "residual-GF4": 57.4104976209146
+  },
+  "shapes": [
+    {
+      "K": 4096,
+      "N": 1024,
+      "count": 56
+    },
+    {
+      "K": 4096,
+      "N": 3072,
+      "count": 56
+    },
+    {
+      "K": 4096,
+      "N": 8192,
+      "count": 56
+    },
+    {
+      "K": 8192,
+      "N": 3072,
+      "count": 28
+    }
+  ]
+}

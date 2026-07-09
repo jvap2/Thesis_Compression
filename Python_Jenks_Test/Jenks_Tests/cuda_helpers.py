@@ -329,6 +329,13 @@ def vectorized_filter_mask(indices: torch.Tensor, min_indices: torch.Tensor) -> 
 
     return mask
 
+# Fraction of surviving (kept) weights to additionally prune beyond the Jenks
+# natural break. 0.0 == pure Jenks (original behavior). With >0, re-pruning a
+# layer that already contains zeros compounds: the Jenks break lands at the
+# zero/survivor boundary, and this shift removes the lowest alpha-fraction of
+# the survivors, so iterative pruning increases sparsity each pass.
+OVER_PRUNE = 0.0
+
 # Create a random tensor
 def Conv_Mask(weights_cuda):
     B, C, H, W = weights_cuda.shape
@@ -385,6 +392,9 @@ def Linear_Mask(weights_cuda):
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
     var = module_weights.jenks_optimization_cuda(weights_cuda_sorted)
     var_min = var.argmin().item()
+    if OVER_PRUNE > 0:
+        n = weights_cuda_flatten.numel()
+        var_min = min(var_min + int(OVER_PRUNE * (n - var_min)), n - 1)
     # Print the output
     ones = weights_cuda_indices[var_min:]
     arr = torch.zeros(weights_cuda_flatten.shape)
@@ -401,6 +411,9 @@ def Bias_Mask(weights_cuda):
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
     var = module_bias.jenks_optimization_biases_cuda(weights_cuda_sorted)
     var_min = var.argmin().item()
+    if OVER_PRUNE > 0:
+        n = weights_cuda.numel()
+        var_min = min(var_min + int(OVER_PRUNE * (n - var_min)), n - 1)
     # Print the output
     # zeros = weights_cuda_indices[:var_min]
     ones = weights_cuda_indices[var_min:]

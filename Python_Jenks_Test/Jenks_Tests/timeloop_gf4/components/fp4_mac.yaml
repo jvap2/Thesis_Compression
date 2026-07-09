@@ -1,0 +1,35 @@
+# Compound component: a plain FP4 MAC (hardwired-E2M1 PE, no LUT) — the NVFP4
+# baseline.  Identical to lut_fp4_mac.yaml MINUS the 16-entry LUT subcomponent,
+# so (lut_fp4_mac - fp4_mac) energy/area == the programmable-codebook overhead.
+# Both engines must use a COMPOUND mac: Accelergy emits ERT entries only for
+# components with explicitly enumerated actions, so a bare primitive intmac
+# yields an empty ERT (tables: []) and Timeloop aborts with "key not found: tables".
+compound_components:
+  version: 0.3
+  classes:
+    - name: fp4_mac
+      attributes:
+        technology: "45nm"
+        datawidth: 4
+      subcomponents:
+        - name: mac
+          class: intmac
+          attributes:
+            datawidth: 4
+            width: 4
+      actions:
+        - name: mac_random
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_random}
+        - name: mac_gated
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_gated}
+        - name: idle
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: idle}

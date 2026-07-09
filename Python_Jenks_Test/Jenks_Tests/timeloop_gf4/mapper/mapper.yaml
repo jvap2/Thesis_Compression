@@ -1,0 +1,14 @@
+# Timeloop mapper config — fast search.  We want a good-enough mapping for an
+# energy COMPARISON (both engines use the same mapper), not the global optimum,
+# so the search effort is cut ~25x vs the default: each shape now finishes in
+# ~30-60s instead of ~12 min.  Bump timeout/victory-condition back up for a
+# final, more-optimal pass once the pipeline is validated.
+mapper:
+  optimization-metrics: [ "energy", "delay" ]
+  live-status: False
+  num-threads: 8
+  timeout: 500
+  victory-condition: 100
+  search-size: 2000
+  algorithm: "random-pruned"
+  max-permutations-per-if-visit: 8

@@ -1,0 +1,101 @@
+% GF4-Engine hardware diagram (TikZ). Drop into the paper, or compile standalone
+% (uncomment the wrapper). Front-end = Kronecker-tiled FULL-ROW FWHT: block-diagonal
+% Hadamard collapses at scale (opt-1.3b A16 -> 7405), so the transform must be
+% full-row; H_M = H_G (x) H_B tiles it into local B-butterflies + a cross-block
+% stage (adders only), keeping compute local without sacrificing correctness.
+%
+% Preamble needs:
+%   \usepackage{tikz}
+%   \usetikzlibrary{arrows.meta,positioning,fit,calc}
+%
+% ---- standalone wrapper (uncomment to compile on its own) --------------------
+% \documentclass[tikz,border=6pt]{standalone}
+% \usepackage{tikz}
+% \usetikzlibrary{arrows.meta,positioning,fit,calc}
+% \begin{document}
+% -----------------------------------------------------------------------------
+
+\begin{figure}[t]\centering
+\begin{tikzpicture}[
+  font=\small, >=Latex,
+  blk/.style={rounded corners=2pt, draw=black!70, line width=0.7pt, align=center,
+              inner sep=3pt, minimum height=8mm},
+  sram/.style={blk, fill=blue!12},
+  fwht/.style={blk, fill=green!16},
+  bfly/.style={blk, fill=green!14, minimum height=5mm, font=\scriptsize},
+  lut/.style ={blk, fill=orange!22},
+  mac/.style ={blk, fill=red!16},
+  acc/.style ={blk, fill=green!22},
+  grey/.style={blk, fill=black!8},
+  flow/.style={->, line width=0.9pt},
+]
+
+% ===== (a) datapath (all horizontal — no crossing labels) ====================
+\node[sram] (sram) {SRAM\\\scriptsize 4-bit acts};
+\node[fwht, right=9mm of sram] (fw) {FWHT front-end\\\scriptsize full-row, tiled\\\scriptsize adders only};
+\node[lut, right=9mm of fw] (cb) {RMS scale $+$\\codebook LUT\\\scriptsize $16\times$E4M3};
+\node[mac, right=9mm of cb] (m) {\textbf{int4}\\\textbf{MAC}};
+\node[acc, right=9mm of m] (ac) {\textbf{wide acc.}\\\scriptsize 24-bit psum};
+
+\draw[flow] (sram) -- node[above,font=\scriptsize]{acts} (fw);
+\draw[flow] (fw) -- node[above,font=\scriptsize]{rotated} (cb);
+\draw[flow] (cb) -- node[above,font=\scriptsize]{decoded} (m);
+\draw[flow] (m) -- (ac);
+\draw[->, line width=0.9pt, red!70!black, dashed]
+      (ac.south) .. controls +(0,-0.9) and +(0,-0.9) .. (m.south)
+      node[midway, below, font=\scriptsize, red!70!black]
+      {multi-pass residual $Q\!\leftarrow\!Q+\mathrm{GF4}(x-Q)$};
+\node[font=\scriptsize, text=black!55, below=1mm of cb.south]
+  {scale is Parseval-parallel ($\lVert Hx\rVert=\lVert x\rVert$)};
+\node[font=\bfseries, above=2mm of fw.north, anchor=south, xshift=10mm]
+  {(a) full-row FWHT front-end fused into the FP4 quantize datapath};
+
+% ===== (b) Kronecker-tiled full-row FWHT =====================================
+\begin{scope}[yshift=-42mm]
+  \node[grey] (x) {$x$: $M$\\\scriptsize $=G\times B$};
+  % stage 1: G local B-butterflies
+  \node[bfly, right=7mm of x, yshift=6mm]  (b0) {$H_B$ blk $0$};
+  \node[bfly, below=1.5mm of b0]           (b1) {$H_B$ blk $1$};
+  \node[bfly, below=1.5mm of b1]           (b2) {$\vdots$};
+  \node[above=0.5mm of b0, font=\scriptsize\bfseries, align=center] {Stage 1: $G$ local\\$B$-butterflies};
+  \node[blk, fill=blue!12, right=6mm of b1] (ct) {corner-turn\\\scriptsize (transpose)};
+  % stage 2: B cross-block G-butterflies
+  \node[bfly, right=6mm of ct, yshift=6mm]  (g0) {$H_G$ mix $0$};
+  \node[bfly, below=1.5mm of g0]            (g1) {$H_G$ mix $1$};
+  \node[bfly, below=1.5mm of g1]            (g2) {$\vdots$};
+  \node[above=0.5mm of g0, font=\scriptsize\bfseries, align=center] {Stage 2: $B$ cross-block\\$G$-butterflies};
+  \node[lut, right=6mm of g1] (out) {rotated\\\scriptsize $xH$};
+
+  \draw[flow] (x.east) -- (b1.west);
+  \draw[flow] (b1.east) -- (ct.west);
+  \draw[flow] (ct.east) -- (g1.west);
+  \draw[flow] (g1.east) -- (out.west);
+
+  % butterfly-node inset
+  \begin{scope}[shift={($(out.east)+(1.4,0)$)}]
+    \node[font=\scriptsize\bfseries, align=center] at (0.55,1.15) {butterfly node};
+    \draw[line width=0.8pt] (0,0.8)--(1.1,0.0) (0,0.0)--(1.1,0.8) (0,0.8)--(1.1,0.8) (0,0.0)--(1.1,0.0);
+    \node[left,font=\scriptsize]  at (0,0.8) {$a$};   \node[left,font=\scriptsize]  at (0,0.0) {$b$};
+    \node[right,font=\scriptsize] at (1.1,0.8) {$a{+}b$}; \node[right,font=\scriptsize] at (1.1,0.0) {$a{-}b$};
+    \node[font=\scriptsize, red!70!black, align=center] at (0.55,-0.5) {add/sub only ($\pm1$)\\no multiplier};
+  \end{scope}
+  \node[font=\bfseries, above=6.5mm of ct.north, anchor=south]
+    {(b) full-row $H_M=H_G\otimes H_B$ as tiled butterflies (block-diagonal collapses at scale)};
+\end{scope}
+
+\end{tikzpicture}
+\caption{The GF4-Engine front-end. (a)~A full-row Walsh--Hadamard rotation is fused
+into the FP4 quantize datapath: the rotated activation feeds a per-block RMS scale
+(computable in parallel from the un-rotated block, since $\lVert Hx\rVert=\lVert x\rVert$)
+and the programmable codebook, then the int4 MAC and the wide accumulator that also
+serves the multi-pass residual passes. (b)~Block-diagonal Hadamard collapses at
+scale (opt-1.3b $A16\!\to\!7405$), so the rotation must be full-row; the Kronecker
+factorization $H_M=H_G\otimes H_B$ realizes it as $G$ local $B$-wide butterflies, a
+corner-turn, and $B$ cross-block $G$-wide butterflies. Every node is an
+add/subtract ($\pm1$)---no multipliers---in a $\log_2 M$-stage network that reuses
+one small butterfly tile. The method also runs on existing FP4 hardware (full-row
+rotation in software); this engine is a minimal dedicated realization.}
+\label{fig:engine}
+\end{figure}
+
+% \end{document}   % (close standalone wrapper if used)

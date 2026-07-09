@@ -1,0 +1,178 @@
+[s6-init] making user provided files available at /var/run/s6/etc...exited 0.
+[s6-init] ensuring user provided files have correct perms...exited 0.
+[fix-attrs.d] applying ownership & permissions fixes...
+[fix-attrs.d] done.
+[cont-init.d] executing container initialization scripts...
+[cont-init.d] 10-adduser: executing... 
+usermod: no changes
+cp: cannot stat '/usr/local/src/accelergy_default_config.yaml': No such file or directory
+
+-------------------------------------
+User uid:    911
+User gid:    911
+-------------------------------------
+
+[cont-init.d] 10-adduser: exited 0.
+[cont-init.d] done.
+[services.d] starting services
+Starting Jupter Notebook.
+[services.d] done.
+input file: /work/arch/gf4_ingress_engine.yaml
+input file: /work/components/lut_fp4_mac.yaml
+input file: /work/components/fp4_mac.yaml
+input file: /work/components/lut_regfile.yaml
+input file: /work/components/lut_sram.yaml
+input file: /work/mapper/mapper.yaml
+input file: /work/prob/opt-125m__fc2_ffxd.yaml
+WARNING: found neither a problem shape description nor a string corresponding to a to a pre-existing shape description. Assuming shape: cnn_layer.
+MESSAGE: attempting to read problem shape from file: /usr/local/src/timeloop/problem-shapes/cnn_layer.yaml
+Warning: Hyphenated keyword max-permutations-per-if-visit found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword word-bits found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword num-threads found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword live-status found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword block-size found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword optimization-metrics found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword search-size found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword victory-condition found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword random-pruned found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+  _______                __                
+ /_  __(_)___ ___  ___  / /___  ____  ____ 
+  / / / / __ `__ \/ _ \/ / __ \/ __ \/ __ \
+ / / / / / / / / /  __/ / /_/ / /_/ / /_/ /
+/_/ /_/_/ /_/ /_/\___/_/\____/\____/ .___/ 
+                                  /_/      
+
+Problem configuration complete.
+execute:/usr/local/bin/accelergy /work/arch/gf4_ingress_engine.yaml /work/components/lut_fp4_mac.yaml /work/components/fp4_mac.yaml /work/components/lut_regfile.yaml /work/components/lut_sram.yaml /work/mapper/mapper.yaml /work/prob/opt-125m__fc2_ffxd.yaml --oprefix timeloop-mapper. -o ./ > timeloop-mapper.accelergy.log 2>&1
+[I 2026-06-23 18:07:21.088 ServerApp] jupyter_lsp | extension was successfully linked.
+[I 2026-06-23 18:07:21.091 ServerApp] jupyter_server_terminals | extension was successfully linked.
+[I 2026-06-23 18:07:21.093 ServerApp] jupyterlab | extension was successfully linked.
+[I 2026-06-23 18:07:21.094 ServerApp] Writing Jupyter server cookie secret to /tmp/jupyter_cookie_secret
+Generate Accelergy ERT (energy reference table) to replace internal energy model.
+Generate Accelergy ART (area reference table) to replace internal area model.
+Architecture configuration complete.
+Sparse optimization configuration complete.
+Using threads = 8
+Mapper configuration complete.
+Initializing Index Factorization subspace.
+  Factorization options along problem dimension R = 1
+  Factorization options along problem dimension S = 1
+  Factorization options along problem dimension P = 1
+  Factorization options along problem dimension Q = 1
+  Factorization options along problem dimension C = 5005
+  Factorization options along problem dimension K = 2475
+  Factorization options along problem dimension N = 1365
+Mapspace Dimension [IndexFactorization] Size: 16908766875
+Mapspace Dimension [LoopPermutation] Size: 645241282560000
+Mapspace Dimension [Spatial] Size: 8
+Mapspace Dimension [DatatypeBypass] Size: 512
+Mapspace split! Per-split Mapping Dimension [IndexFactorization] Size: 2113595860 Residue: 5
+Mapspace construction complete.
+Search configuration complete.
+[  4] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 - L0[] N2048 K3 C16 
+[  3] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C32 - L0[] N2048 K3 
+[  5] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 C2 - L0[] N2048 K3 C8 
+[  1] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C8 - L0[] N2048 K3 C4 
+[  6] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 C4 - L0[] N2048 K3 C4 
+[  2] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C16 - L0[] N2048 K3 C2 
+[  0] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C4 - L0[] N2048 K3 C8 
+[  7] Utilization = 0.00 | pJ/Compute =  200.984 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 C8 - L0[] N2048 K3 C2 
+[  3] Utilization = 0.00 | pJ/Compute =  152.475 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C32 - L0[W] N2048 K3 
+[  1] Utilization = 0.00 | pJ/Compute =  152.475 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C8 - L0[W] N2048 K3 C4 
+[  6] Utilization = 0.00 | pJ/Compute =  152.475 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 C4 - L0[W] N2048 K3 C4 
+[  2] Utilization = 0.00 | pJ/Compute =  152.475 | L3[WIO] C24 - L2[] K2 C4 - L1[] K128 C16 - L0[W] N2048 K3 C2 
+[  7] Utilization = 0.00 | pJ/Compute =  152.475 | L3[WIO] C24 - L2[] K2 C8 - L1[] K128 C8 - L0[W] N2048 K3 C2 
+[  4] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[] N64 - L0[] C2 
+[  4] Utilization = 0.19 | pJ/Compute =  106.834 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[] N64 - L0[W] C2 
+[  4] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[W] N64 - L0[] C2 
+[  4] Utilization = 0.19 | pJ/Compute =   71.314 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[] N64 - L0[O] C2 
+[  4] Utilization = 0.19 | pJ/Compute =   60.498 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[] N64 - L0[WO] C2 
+[  4] Utilization = 0.19 | pJ/Compute =   59.257 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[W] N64 - L0[O] C2 
+[  4] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[O] N64 - L0[] C2 
+[  4] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[O] N64 - L0[W] C2 
+[  0] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[] N64 C2 - L0[] C2 
+[  5] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C12 - L1[] N64 C2 - L0[] N1 
+[  7] Utilization = 0.38 | pJ/Compute =   67.650 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[] N64 - L0[] C12 
+[  0] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[W] N64 C2 - L0[] C2 
+[  5] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C12 - L1[W] N64 C2 - L0[] N1 
+[  3] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 C3 - L0[] N1 
+[  7] Utilization = 0.38 | pJ/Compute =   56.834 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[] N64 - L0[W] C12 
+[  6] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C24 - L1[] N64 - L0[] N1 
+[  7] Utilization = 0.38 | pJ/Compute =   55.594 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[W] N64 - L0[] C12 
+[  3] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[W] N64 C3 - L0[] N1 
+[  6] Utilization = 0.19 | pJ/Compute =  106.834 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C24 - L1[] N64 - L0[W] N1 
+[  6] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C24 - L1[W] N64 - L0[] N1 
+[  7] Utilization = 0.38 | pJ/Compute =   24.869 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[] N64 - L0[O] C12 
+[  0] Utilization = 0.19 | pJ/Compute =   45.948 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[] N64 C2 - L0[O] C2 
+[  5] Utilization = 0.19 | pJ/Compute =   71.314 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C12 - L1[] N64 C2 - L0[O] N1 
+[  1] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[] N64 C4 - L0[] N1 
+[  7] Utilization = 0.38 | pJ/Compute =   14.053 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[] N64 - L0[WO] C12 
+[  7] Utilization = 0.38 | pJ/Compute =   12.812 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[W] N64 - L0[O] C12 
+[  0] Utilization = 0.19 | pJ/Compute =   33.891 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[W] N64 C2 - L0[O] C2 
+[  5] Utilization = 0.19 | pJ/Compute =   59.257 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C12 - L1[W] N64 C2 - L0[O] N1 
+[  3] Utilization = 0.19 | pJ/Compute =   54.403 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 C3 - L0[O] N1 
+[  1] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[W] N64 C4 - L0[] N1 
+[  2] Utilization = 0.19 | pJ/Compute =  117.650 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 - L0[] C3 
+[  3] Utilization = 0.19 | pJ/Compute =   42.346 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[W] N64 C3 - L0[O] N1 
+[  2] Utilization = 0.19 | pJ/Compute =  106.834 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 - L0[W] C3 
+[  2] Utilization = 0.19 | pJ/Compute =  105.594 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[W] N64 - L0[] C3 
+[  7] Utilization = 0.38 | pJ/Compute =   11.509 | L3[WIO] K2 C128 N4Y C2Y K12X - L2[] N8 K32 - L1[O] N64 - L0[W] C12 
+[  0] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[O] N64 C2 - L0[] C2 
+[  5] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C12 - L1[O] N64 C2 - L0[] N1 
+[  1] Utilization = 0.19 | pJ/Compute =   45.948 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[] N64 C4 - L0[O] N1 
+[  3] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[O] N64 C3 - L0[] N1 
+[  1] Utilization = 0.19 | pJ/Compute =   33.891 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[W] N64 C4 - L0[O] N1 
+[  2] Utilization = 0.19 | pJ/Compute =   54.403 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 - L0[O] C3 
+[  2] Utilization = 0.19 | pJ/Compute =   43.587 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[] N64 - L0[WO] C3 
+[  2] Utilization = 0.19 | pJ/Compute =   42.346 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[W] N64 - L0[O] C3 
+[  1] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C6 - L1[O] N64 C4 - L0[] N1 
+[  6] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C24 - L1[O] N64 - L0[] N1 
+[  6] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C24 - L1[O] N64 - L0[W] N1 
+[  2] Utilization = 0.19 | pJ/Compute =   22.315 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[O] N64 - L0[] C3 
+[  2] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] K2 C128 N4Y K12X - L2[] N8 K32 C8 - L1[O] N64 - L0[W] C3 
+[  7] Utilization = 0.38 | pJ/Compute =   11.318 | L3[WIO] C128 K2 C2Y N4Y K12X - L2[] K32 N8 - L1[O] N64 - L0[W] C12 
+[I 2026-06-23 18:07:21.222 ServerApp] notebook_shim | extension was successfully linked.
+[I 2026-06-23 18:07:21.233 ServerApp] notebook_shim | extension was successfully loaded.
+[I 2026-06-23 18:07:21.234 ServerApp] jupyter_lsp | extension was successfully loaded.
+[I 2026-06-23 18:07:21.235 ServerApp] jupyter_server_terminals | extension was successfully loaded.
+[I 2026-06-23 18:07:21.236 LabApp] JupyterLab extension loaded from /usr/local/lib/python3.10/dist-packages/jupyterlab
+[I 2026-06-23 18:07:21.236 LabApp] JupyterLab application directory is /usr/local/share/jupyter/lab
+[I 2026-06-23 18:07:21.236 LabApp] Extension Manager is 'pypi'.
+[I 2026-06-23 18:07:21.286 ServerApp] jupyterlab | extension was successfully loaded.
+[I 2026-06-23 18:07:21.287 ServerApp] Serving notebooks from local directory: /home/workspace
+[I 2026-06-23 18:07:21.287 ServerApp] Jupyter Server 2.15.0 is running at:
+[I 2026-06-23 18:07:21.287 ServerApp] http://a929928aae5b:8888/lab?token=fe9ea0f40b4d65798281a6c45a8d85891b0f136064d98567
+[I 2026-06-23 18:07:21.287 ServerApp]     http://127.0.0.1:8888/lab?token=fe9ea0f40b4d65798281a6c45a8d85891b0f136064d98567
+[I 2026-06-23 18:07:21.287 ServerApp] Use Control-C to stop this server and shut down all kernels (twice to skip confirmation).
+[C 2026-06-23 18:07:21.288 ServerApp] 
+    
+    To access the server, open this file in a browser:
+        file:///tmp/jpserver-205-open.html
+    Or copy and paste one of these URLs:
+        http://a929928aae5b:8888/lab?token=fe9ea0f40b4d65798281a6c45a8d85891b0f136064d98567
+        http://127.0.0.1:8888/lab?token=fe9ea0f40b4d65798281a6c45a8d85891b0f136064d98567
+[I 2026-06-23 18:07:21.295 ServerApp] Skipped non-installed server(s): bash-language-server, dockerfile-language-server-nodejs, javascript-typescript-langserver, jedi-language-server, julia-language-server, pyright, python-language-server, python-lsp-server, r-languageserver, sql-language-server, texlab, typescript-language-server, unified-language-server, vscode-css-languageserver-bin, vscode-html-languageserver-bin, vscode-json-languageserver-bin, yaml-language-server
+[  5] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C12 - L1[O] C2 N64 - L0[W] N1 
+[  0] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C6 - L1[O] C2 N64 - L0[W] C2 
+[  3] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C8 - L1[O] C3 N64 - L0[W] N1 
+[  1] Utilization = 0.19 | pJ/Compute =   11.499 | L3[WIO] C128 K2 K12Y N4X - L2[] K32 N8 C6 - L1[O] C4 N64 - L0[W] N1 
+[  6] STATEMENT: 250 valid mappings found, terminating search.
+[  5] STATEMENT: 250 valid mappings found, terminating search.
+[  4] STATEMENT: 250 valid mappings found, terminating search.
+[  3] STATEMENT: 250 valid mappings found, terminating search.
+[  2] STATEMENT: 250 valid mappings found, terminating search.
+[  0] STATEMENT: 250 valid mappings found, terminating search.
+[  1] STATEMENT: 250 valid mappings found, terminating search.
+[  7] STATEMENT: 250 valid mappings found, terminating search.
+
+
+Summary stats for best mapping found by mapper:
+  Utilization = 0.38 | pJ/Compute =   11.318
+[cmd] timeloop-mapper exited 0
+[C 2026-06-23 18:07:22.146 ServerApp] received signal 15, stopping
+[I 2026-06-23 18:07:22.146 ServerApp] Shutting down 4 extensions
+[cont-finish.d] executing container finish scripts...
+[cont-finish.d] done.
+[s6-finish] waiting for services.
+[s6-finish] sending all processes the TERM signal.
+[s6-finish] sending all processes the KILL signal and exiting.

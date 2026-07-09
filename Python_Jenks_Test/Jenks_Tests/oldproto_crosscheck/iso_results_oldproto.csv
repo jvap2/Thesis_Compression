@@ -1,0 +1,3 @@
+timestamp,model,retain,calib_seqlen,had_bs,A16,NVFP4_fixed,NVFP4_adap,MXFP4,GF4,GF4_adap,GF4_learned,residual
+2026-07-04 17:22:36,facebook/opt-6.7b,1,2048,auto,12.5889,13.5093,13.1383,13.2617,13.3121,13.0736,nan,12.5996
+2026-07-06 12:50:01,facebook/opt-6.7b,0,2048,auto,12.6572,19043.1795,21017.8005,24778.8448,18637.3723,33106.2604,nan,19.5967

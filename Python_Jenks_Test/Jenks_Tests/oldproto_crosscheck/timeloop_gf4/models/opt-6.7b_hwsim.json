@@ -1,0 +1,37 @@
+{
+  "model": "facebook/opt-6.7b",
+  "seqlen": 2048,
+  "block_size": 16,
+  "skipped_fp16": [
+    "fc2"
+  ],
+  "config": {
+    "hidden_size": 4096,
+    "intermediate_size": 16384,
+    "num_hidden_layers": 32,
+    "vocab_size": 50272
+  },
+  "ppl": {
+    "A16 (W4A16)": 12.657190168021918,
+    "E2M1/NVFP4": 21017.800489146885,
+    "GF4 adaptive": 33106.260371481,
+    "residual-GF4": 19.596730149548613
+  },
+  "shapes": [
+    {
+      "K": 4096,
+      "N": 4096,
+      "count": 128
+    },
+    {
+      "K": 4096,
+      "N": 16384,
+      "count": 32
+    },
+    {
+      "K": 16384,
+      "N": 4096,
+      "count": 32
+    }
+  ]
+}

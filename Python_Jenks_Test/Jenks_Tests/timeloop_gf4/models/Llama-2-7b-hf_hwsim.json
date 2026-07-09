@@ -1,0 +1,11 @@
+{
+  "model": "meta-llama/Llama-2-7b-hf",
+  "seqlen": 2048,
+  "block_size": 16,
+  "config": {"hidden_size": 4096, "intermediate_size": 11008, "num_hidden_layers": 32, "vocab_size": 32000},
+  "ppl": {"A16 (W4A16)": 5.628958269012372, "E2M1/NVFP4": 5.937657598851067, "GF4 adaptive": 5.864064418389631, "residual-GF4": 5.632502650479444},
+  "shapes": [
+    {"K": 4096, "N": 4096, "count": 128},
+    {"K": 4096, "N": 11008, "count": 64}
+  ]
+}

@@ -1,4 +1,5 @@
 import functools
+import gc
 
 import torch
 import torch.nn as nn
@@ -268,20 +269,17 @@ def quantize_activations_gf4_adaptive(
     x, block_size,
     clip_candidates=(1.5, 2.0, 2.5, 3.0, 4.0),
     levels=None,
+    chunk_size=32768,
 ):
     """
     Per-block online clip-ratio selection for GF4 (novel).
 
     For each quantization block independently, evaluates all clip_candidates
-    and picks the one minimizing reconstruction MSE — fully vectorized over
-    the candidate dimension, no Python loop over blocks.
-
-    Unlike calibrate_model_gf4's per-layer α*, this adapts at block
-    granularity and requires no calibration pass. Blocks with locally extreme
-    activations get a wider clip; quiet blocks get a tighter one.
-
-    Cost: ~C× the memory of a single GF4 pass (C = len(clip_candidates)),
-    no additional compute bottleneck since all candidates run in parallel.
+    and picks the one minimizing reconstruction MSE. Blocks are processed in
+    chunks of `chunk_size` to bound peak memory regardless of sequence length
+    — the [B, bs, 8] dist tensor is the dominant allocation and would OOM on
+    long GPTQ sequences (2048 tokens × batch 4 × 128 blocks = ~1M blocks).
+    chunk_size=32768 keeps dist at ~16MB per candidate pass.
     """
     orig_dtype = x.dtype
     orig_shape = x.shape
@@ -301,40 +299,42 @@ def quantize_activations_gf4_adaptive(
     n_blk = K_pad // block_size
     B     = N * n_blk
 
-    x_blk = x_pad.reshape(B, block_size)
+    x_blk = x_pad.reshape(B, block_size)   # [B, bs]
     sign  = torch.sign(x_blk)
-    x_abs = x_blk.abs()
+    x_abs = x_blk.abs()                    # [B, bs]
     rms   = x_abs.pow(2).mean(dim=-1).sqrt().clamp(min=1e-8)  # [B]
 
-    C      = len(clip_candidates)
-    alphas = torch.tensor(clip_candidates, device=device, dtype=torch.float32)  # [C]
+    best_mse  = torch.full((B,), float('inf'), device=device)  # [B]
+    best_hat  = torch.zeros_like(x_blk)                        # [B, bs]
 
-    # scales: [C, B, 1]  rms[b] * alpha[c]
-    scales    = (rms.unsqueeze(0) * alphas.unsqueeze(1)).unsqueeze(-1)
-    # [C, B, bs] — normalized absolute values
-    x_abs_exp = x_abs.unsqueeze(0).expand(C, -1, -1)
-    x_norm    = (x_abs_exp / scales).clamp(0.0, 1.0)
+    for start in range(0, B, chunk_size):
+        end      = min(start + chunk_size, B)
+        s_abs    = x_abs[start:end]                            # [C, bs]
+        s_sign   = sign[start:end]
+        s_rms    = rms[start:end]                              # [C]
 
-    # Nearest-neighbor lookup: [C, B, bs, L] → [C, B, bs]
-    dist      = (x_norm.unsqueeze(-1) - levels.view(1, 1, 1, -1)).abs()
-    q_lvl     = levels[dist.argmin(dim=-1)]
+        c_best_mse = best_mse[start:end].clone()
+        c_best_hat = best_hat[start:end].clone()
 
-    # Reconstruct: [C, B, bs]
-    x_hat_all = sign.unsqueeze(0) * scales * q_lvl
+        for alpha in clip_candidates:
+            scale  = (s_rms * alpha).unsqueeze(-1)             # [C, 1]
+            x_norm = (s_abs / scale).clamp(0.0, 1.0)          # [C, bs]
+            dist   = (x_norm.unsqueeze(-1) - levels.view(1, 1, -1)).abs()
+            q_lvl  = levels[dist.argmin(dim=-1)]               # [C, bs]
+            x_hat  = s_sign * scale * q_lvl                    # [C, bs]
+            mse    = (s_abs - x_hat.abs()).pow(2).mean(dim=-1) # [C]
 
-    # Per-block MSE — minimize over candidate axis
-    mse  = (x_abs_exp - x_hat_all.abs()).pow(2).mean(dim=-1)   # [C, B]
-    best = mse.argmin(dim=0)                                    # [B]
+            better     = mse < c_best_mse
+            c_best_mse = torch.where(better, mse, c_best_mse)
+            c_best_hat = torch.where(better.unsqueeze(-1), x_hat, c_best_hat)
 
-    # Gather best candidate per block: [B, C, bs] → [B, bs]
-    x_hat_t    = x_hat_all.permute(1, 0, 2)                    # [B, C, bs]
-    best_exp   = best.view(B, 1, 1).expand(-1, 1, block_size)
-    x_hat_best = x_hat_t.gather(1, best_exp).squeeze(1)        # [B, bs]
+        best_mse[start:end] = c_best_mse
+        best_hat[start:end] = c_best_hat
 
-    x_hat = x_hat_best.reshape(N, K_pad)
+    x_hat_out = best_hat.reshape(N, K_pad)
     if pad > 0:
-        x_hat = x_hat[:, :K]
-    return x_hat.reshape(orig_shape).to(orig_dtype)
+        x_hat_out = x_hat_out[:, :K]
+    return x_hat_out.reshape(orig_shape).to(orig_dtype)
 
 
 def quantize_activations_gf4_residual(
@@ -361,6 +361,43 @@ def quantize_activations_gf4_residual(
     residual = x_f - x_q1
     x_q2 = quantize_activations_gf4(residual, block_size, clip_ratio=clip_ratio2, levels=levels)
     return (x_q1 + x_q2).to(x.dtype)
+
+
+def quantize_gf4_residual_npass(x, block_size, n_pass=2, clip_ratios=None, levels=None):
+    """
+    N-stage residual GF4 — the hardware "multi-pass" precision model.
+
+    Generalizes quantize_activations_gf4_residual to an arbitrary pass count.
+    Each pass GF4-quantizes the residual the previous passes left behind and
+    accumulates in FP (one shared per-block scale across passes):
+
+        Q = 0;  for p in range(n_pass):  Q += GF4(x - Q)
+
+    Precision dial (each pass adds ~9 dB SNR ≈ 1.5 effective bits; the residual
+    of GF4-quantized Gaussian data is itself ~Gaussian, so GF4 stays near-optimal
+    on every pass):
+        n_pass=1 -> plain GF4 (W4A4, ~3 eff. bits)
+        n_pass=2 -> residual-GF4 (~6 eff. bits, ≈A16; == the 2-stage version)
+        n_pass=4 -> ~6-10 eff. bits depending on tail heaviness — empirically
+                    enough to recover FP16-RETENTION accuracy on the outlier
+                    layers (down_proj/fc2/lm_head), so a multi-pass FP4 engine
+                    runs them on its accumulator with NO dedicated FP16 unit.
+                    (Validate the exact pass count with validate_multipass.py.)
+
+    Distribution-agnostic, so it applies to weights or activations.  The output
+    is a sum of n_pass FP4 codes — exactly what the wide accumulator on a
+    multi-pass FP4 array produces, so its reconstruction error is the accuracy
+    that hardware would actually see.
+    """
+    if clip_ratios is None:
+        clip_ratios = [2.5] * n_pass
+    x_f = x.float()
+    q_total = torch.zeros_like(x_f)
+    for p in range(n_pass):
+        q = quantize_activations_gf4(x_f - q_total, block_size,
+                                     clip_ratio=clip_ratios[p], levels=levels)
+        q_total = q_total + q
+    return q_total.to(x.dtype)
 
 
 # ── Learned GF4 codebook optimization ────────────────────────────────────────
@@ -471,8 +508,12 @@ def calibrate_gf4_learned_levels(
             clip = module.act_clip_ratio if module.act_clip_ratio is not None else 2.5
             if bs is None:
                 return
-            x_h = fwht_blockwise(x_raw * D.to(x_raw.device), bs) \
-                  if D is not None else fwht_blockwise(x_raw, bs)
+            if D is not None:
+                x_h = _rotate(x_raw, D, bs)
+            else:
+                if x_raw.shape[-1] < bs:
+                    x_raw = F.pad(x_raw, (0, bs - x_raw.shape[-1]))
+                x_h = fwht_blockwise(x_raw, bs)
             if mu is not None:
                 x_h = x_h - mu.to(x_h.device)
             # Normalize blocks to [0, 1] for level optimization
@@ -815,7 +856,12 @@ def compute_hessian_blocks(x, layer, block_size):
     H_blocks = []
     for i in range(0, D, block_size):
         end = min(i + block_size, D)
-        H_blocks.append(H[i:end, i:end])
+        # .clone() is REQUIRED: a bare slice is a view that keeps the full
+        # D×D dense H alive. Stored across all layers in H_data, those views
+        # retain a dense Hessian per layer (419 MB for a 10240-wide fc2) and
+        # OOM large models. Cloning detaches the k×k block so H can be freed.
+        H_blocks.append(H[i:end, i:end].clone())
+    del H
     return H_blocks
 
 def solve_alpha_blockwise_Hessian_blockdiag(W, basis, H_blocks, mask, block_size):
@@ -1018,10 +1064,7 @@ def compute_hessian_hadamard_domain(model, data_loader, device, block_size, num_
             def hook(mod, inp, out):
                 x = inp[0].detach().float()
                 x_2d  = x.reshape(-1, x.shape[-1])
-                x_had = fwht_blockwise(
-                    x_2d * D_ref.to(device=x_2d.device, dtype=x_2d.dtype),
-                    had_bs
-                )
+                x_had = _rotate(x_2d, D_ref, had_bs)
                 H_blocks = compute_hessian_blocks(x_had, inner, block_size)
                 if H_blocks is None:
                     return
@@ -9541,6 +9584,31 @@ def hadamard_matrix(n, device):
     return H  # [n, n], orthonormal
 
 
+def _next_pow2(n: int) -> int:
+    """Smallest power of 2 >= n."""
+    return 1 << (max(int(n), 1) - 1).bit_length()
+
+
+def _rotate(x, D, block_size):
+    """
+    Padded randomized blockwise Hadamard: fwht_blockwise(D * pad(x), block_size).
+
+    x is zero-padded on the last dim up to len(D) before the sign flip and FWHT.
+    When len(D) == x.shape[-1] (power-of-2 rows) this is a no-op pad and reduces
+    to the original fwht_blockwise(x * D, block_size).  When len(D) > x.shape[-1]
+    (e.g. M=2560 padded to P=4096) it performs ONE full-row Hadamard on the
+    padded vector instead of a block-diagonal M&-M rotation.  Because H is
+    orthogonal and the pad is zeros, (H·x_pad)·(H·W_pad) == x·W exactly.
+    """
+    P = D.shape[-1]
+    M = x.shape[-1]
+    if M < P:
+        x = F.pad(x, (0, P - M))
+    elif M > P:
+        raise ValueError(f"_rotate: x width {M} exceeds D width {P}")
+    return fwht_blockwise(x * D.to(device=x.device, dtype=x.dtype), block_size)
+
+
 def fwht_blockwise(x, block_size):
     """
     Apply Fast Walsh-Hadamard Transform blockwise along the last dimension.
@@ -9601,6 +9669,15 @@ def apply_hadamard_to_weights(W, block_size, D=None, device='cuda'):
     # Equivalently: transform rows of W^T, i.e. transform W along dim=1
     W_had = fwht_blockwise(W, block_size)   # [N, M]
     return W_had
+
+
+def _stable_seed(name: str) -> int:
+    """Deterministic per-layer seed from a layer name. Python's built-in hash()
+    is salted per process (PYTHONHASHSEED), so hash(name) gives DIFFERENT Hadamard
+    rotations on every run — ±1-2 PPL of run-to-run noise that makes the results
+    table irreproducible. A content hash (sha1) is stable across processes."""
+    import hashlib
+    return int(hashlib.sha1(name.encode()).hexdigest(), 16) % (2 ** 31)
 
 
 def generate_random_signs(M, block_size, device, seed=None):
@@ -9867,6 +9944,7 @@ class HadamardQuantLinearFP(nn.Module):
         self.act_clip_ratio  = None   # per-layer GF4 clip ratio (calibrated)
         self.gf4_levels      = None   # [8] learned codebook (None → use GF4_POS)
         self.h_smooth_scale  = None   # [M] per-channel H-domain scale (None → disabled)
+        self.use_fast_kernels = False  # use fwht_hadacore + gf4_quant Triton kernels
         self.register_buffer("mu",              None)
         self.register_buffer("bias_correction", None)
 
@@ -9889,12 +9967,35 @@ class HadamardQuantLinearFP(nn.Module):
 
     # ── Hadamard helper ───────────────────────────────────────────────────
     def _apply_hadamard(self, x):
-        """Apply randomized blockwise Hadamard: fwht(D * x). [T, M] → [T, M]"""
+        """Padded randomized blockwise Hadamard: fwht(D * pad(x)). [T,M] → [T,P].
+
+        x is zero-padded on the last dim up to len(D) (== had_block_size in the
+        "auto" full-Hadamard path) so the rotated activations match weight_q,
+        which lives in the padded [N, P] Hadamard domain.  For power-of-2 rows
+        len(D) == M and the pad is a no-op.
+        """
         assert self.had_block_size is not None, \
             "had_block_size not set — was calibration run?"
         if self.D is not None:
-            x = x * self.D.to(device=x.device, dtype=x.dtype)
-        return fwht_blockwise(x, self.had_block_size)
+            D = self.D.to(device=x.device, dtype=x.dtype)
+            if x.shape[-1] < D.shape[-1]:
+                x = F.pad(x, (0, D.shape[-1] - x.shape[-1]))
+            x = x * D
+        elif x.shape[-1] < self.had_block_size:
+            x = F.pad(x, (0, self.had_block_size - x.shape[-1]))
+        if self.use_fast_kernels:
+            # HadaCore: single-kernel FWHT, all butterfly stages in L2 cache.
+            # Lazy import so the Triton extension is only loaded on demand.
+            from .triton_kernels import fwht_hadacore
+            # Return fp32 (do NOT downcast to x.dtype here). The Hadamard output
+            # feeds the μ-subtraction, which is a catastrophic-cancellation site:
+            # for large-outlier models (e.g. opt-13b) the Hadamard-domain mean μ
+            # is large, and computing x_had - μ in fp16 annihilates the ~O(1)
+            # signal (two big near-equal fp16 numbers). Keeping fp32 through the
+            # mean subtraction fixes the uniform-collapse-at-scale bug; the small
+            # residual is downcast to the compute dtype afterwards.
+            return fwht_hadacore(x.float(), self.had_block_size)
+        return fwht_blockwise(x.float(), self.had_block_size)
 
     # ── Forward ───────────────────────────────────────────────────────────
     def forward(self, x):
@@ -9943,6 +10044,13 @@ class HadamardQuantLinearFP(nn.Module):
                 s = self.h_smooth_scale.to(device=x_2d.device, dtype=x_2d.dtype)
                 x_2d = x_2d / s
 
+            # The Hadamard (step 2) and μ-subtraction (step 3) ran in fp32 to
+            # avoid catastrophic cancellation when μ is large (large-outlier
+            # models like opt-13b). The residual is now small and safe to return
+            # to the compute dtype for activation-quant + GEMM.
+            if x_2d.dtype != orig_dtype:
+                x_2d = x_2d.to(orig_dtype)
+
             # ── Step 4: activation quantization (optional) ────────────
             if self._act_quant_mode is not None:
                 bs  = self.act_block_size or 16
@@ -9951,9 +10059,19 @@ class HadamardQuantLinearFP(nn.Module):
 
                 if self._act_quant_mode == "gf4":
                     clip = self.act_clip_ratio if self.act_clip_ratio is not None else 2.5
-                    x_2d = quantize_activations_gf4(
-                        x_2d, bs, clip_ratio=clip, levels=lvl
-                    ).to(orig_dtype)
+                    if self.use_fast_kernels and lvl is None:
+                        # Triton GF4 kernel: ~2.7× faster than PyTorch.
+                        # Falls back to Python when custom levels are active
+                        # (learned codebook) since the Triton path uses fixed
+                        # GF4_POS levels only.
+                        from .triton_kernels import gf4_quant, gf4_dequant
+                        idx, sc = gf4_quant(x_2d.float(), clip_ratio=clip,
+                                            gf4_block=bs)
+                        x_2d = gf4_dequant(idx, sc, gf4_block=bs).to(orig_dtype)
+                    else:
+                        x_2d = quantize_activations_gf4(
+                            x_2d, bs, clip_ratio=clip, levels=lvl
+                        ).to(orig_dtype)
 
                 elif self._act_quant_mode == "gf4_adaptive":
                     x_2d = quantize_activations_gf4_adaptive(
@@ -9992,6 +10110,67 @@ class HadamardQuantLinearFP(nn.Module):
             out_2d = F.linear(x_2d, W, b_cast)
 
         return out_2d.reshape(*orig_shape[:-1], -1).to(orig_dtype)
+
+
+def save_quantized_model(model, path: str) -> str:
+    """Save a calibrated FP-quant model so it can be reloaded and RUN later.
+
+    Uses a FULL-OBJECT save (torch.save(model)), not model.state_dict(), on
+    purpose: HadamardQuantLinearFP keeps essential state in PLAIN ATTRIBUTES —
+    the Hadamard sign vector ``D``, ``had_block_size``, ``act_quant_mode``,
+    ``act_block_size``, ``act_clip_ratio``, ``gf4_levels``, ``h_smooth_scale``,
+    ``use_fast_kernels`` — which ``state_dict()`` does NOT capture (only ``mu``,
+    ``bias_correction`` and ``weight_q`` are registered buffers).  Without ``D``
+    and ``had_block_size`` the reloaded model cannot run.
+
+    Reload with :func:`load_quantized_model`.  The FP_Quantization_Experiments
+    package (and transformers) must be importable at load time.
+    """
+    import os
+    import torch
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    torch.save(model, path)
+    return path
+
+
+def load_quantized_model(path: str, device: str = "cuda"):
+    """Reload a model saved by :func:`save_quantized_model` onto ``device``.
+
+    ``weights_only=False`` because this is a full module pickle (PyTorch >=2.6
+    defaults to True).  ``map_location`` lets a GPU-saved checkpoint load on a
+    different/absent GPU (pass device="cpu" for analysis on a CPU box).
+    """
+    import torch
+    model = torch.load(path, map_location=device, weights_only=False)
+    model.to(device).eval()
+    return model
+
+
+def enable_fast_kernels(model, enable: bool = True) -> None:
+    """
+    Enable or disable Triton fast kernels (HadaCore FWHT + GF4 quant)
+    for all HadamardQuantLinearFP layers in a model.
+
+    Call after calibration is complete:
+        quantize_model_fp(...)         # calibrate
+        enable_fast_kernels(model)     # switch to Triton paths
+
+    The kernels are loaded lazily on first use; this call itself is free.
+    Requires triton >= 3.0 and a CUDA device.
+
+    Args:
+        model:  any nn.Module containing HadamardQuantLinearFP layers.
+        enable: set False to revert to the Python fallback paths.
+    """
+    count = 0
+    for module in model.modules():
+        if type(module).__name__ == "HadamardQuantLinearFP":
+            module.use_fast_kernels = enable
+            count += 1
+    print(f"{'Enabled' if enable else 'Disabled'} fast kernels on {count} "
+          f"HadamardQuantLinearFP layer{'s' if count != 1 else ''}.")
 
 
 def wrap_layers_with_hadamard(model):
@@ -10655,7 +10834,7 @@ def calibrate_model_hadamard_joint(
         # ── Step 3a: generate random signs D ──────────────────────────
         if randomize_hadamard:
             seed = hadamard_seed if hadamard_seed is not None \
-                   else hash(name) % (2 ** 31)
+                   else _stable_seed(name)
             D = generate_random_signs(M, had_block_size, device, seed=seed)
         else:
             D = torch.ones(M, device=device)
@@ -11669,7 +11848,16 @@ def apply_pruning_mask(model):
             orig_weights = module.linear.weight if isinstance(module, QuantLinearFP) else module.conv.weight
             mask = (orig_weights != 0).float()
             if module.weight_q is not None:
-                module.weight_q *= mask
+                # weight_q may live in a padded Hadamard domain [N, P>=M]; pad the
+                # original-space sparsity mask with ONES so padded/rotated columns
+                # are preserved.  For dense models the mask is all-ones → no-op.
+                if mask.shape[-1] < module.weight_q.shape[-1]:
+                    mask = F.pad(
+                        mask, (0, module.weight_q.shape[-1] - mask.shape[-1]),
+                        value=1.0,
+                    )
+                module.weight_q *= mask.to(device=module.weight_q.device,
+                                           dtype=module.weight_q.dtype)
 
 
 def compute_expected_fp4_weight(W_mat, block_size, e_bits, m_bits,
@@ -11900,6 +12088,17 @@ def calibrate_layer_stochastic_fp4(layer_name, W_orig, H_blocks,
         del tmp_standard
         torch.cuda.empty_cache()
 
+        # The stochastic E[Q(W)] path (steps 2-4) has been rejected on every
+        # layer of every model run (improvement consistently ~-64%), and its
+        # n_samples-fold weight replication is what OOMs the padded FFN layers
+        # (e.g. 2560x16384 fc1) even on an 80GB H100.  Short-circuit to the
+        # standard v5 baseline: identical result, ~half the calibration time,
+        # no OOM.  Set compare_standard=False to force the stochastic path.
+        res_standard["method"]         = "standard"
+        res_standard["err_standard"]   = float("nan")
+        res_standard["err_stochastic"] = float("nan")
+        return res_standard
+
     # ── Step 2: estimate E[Q(W)] ──────────────────────────────────────
     print(f"  [2/4] Estimating E[Q(W)] with {n_samples} samples...")
     W_expected, W_std = compute_expected_fp4_weight(
@@ -11977,9 +12176,18 @@ def calibrate_model_stochastic_fp4(
     randomize_hadamard=True,
     hadamard_seed=None,
     compare_standard=True,
+    extra_skip_patterns=(),
+    lean=False,
 ):
     """
     Full model calibration using stochastic FP4 quantization.
+
+    lean=False (default) is the original behavior — byte-for-byte unchanged.
+    lean=True frees each layer's ORIGINAL weight the moment weight_q is stored,
+    so the GPU never holds both (originals + weight_q ~= 2x model). This halves
+    the resident weight-quant peak (~2x -> ~1x model), letting 6.7B/7B fit a 24GB
+    GPU. The forward uses weight_q; the original is only a fallback (weight_q is
+    set post-calibration) — the post-calib sanity check is skipped in lean mode.
 
     Replaces the standard v5 weight quantization step with the
     stochastic rounding approach: instead of quantizing W_orig
@@ -12008,6 +12216,10 @@ def calibrate_model_stochastic_fp4(
     model.eval().to(device)
 
     SKIP_LAYERS = {"lm_head", "embed_tokens", "embed_positions"}
+    SKIP_LAYERS |= set(extra_skip_patterns)
+    if extra_skip_patterns:
+        print(f"  Extra skip patterns (kept in FP16): "
+              f"{sorted(extra_skip_patterns)}")
 
     # ── Phase 1: wrap layers ──────────────────────────────────────────
     print("Wrapping layers with HadamardQuantLinearFP...")
@@ -12028,18 +12240,31 @@ def calibrate_model_stochastic_fp4(
             continue
         W_shape = module.inner.linear.weight.data.shape
         M = W_shape[1] if len(W_shape) == 2 else W_shape[1] * W_shape[2] * W_shape[3]
-        # "auto" → largest power-of-2 divisor of M (full row when M is a power of 2)
-        actual_had_bs = (M & -M) if had_block_size == "auto" else had_block_size
-        assert M % actual_had_bs == 0, \
-            f"{name}: M={M} not divisible by actual_had_bs={actual_had_bs}"
+        # "auto" → pad M up to the next power of 2 and apply ONE full-row
+        # Hadamard.  For power-of-2 M this is a no-op pad (P == M) identical to
+        # the old full-row behaviour; for non-power-of-2 M (e.g. OPT-2.7b
+        # hidden=2560 → 4096) it replaces the broken block-diagonal M&-M
+        # rotation with a single padded full Hadamard.  D is sized to the
+        # padded width; downstream rotations pad x/W to len(D) via _rotate.
+        if had_block_size == "auto":
+            actual_had_bs = _next_pow2(M)        # full padded Hadamard
+            d_len         = actual_had_bs
+        else:
+            actual_had_bs = had_block_size       # explicit block-diagonal
+            assert M % actual_had_bs == 0, \
+                f"{name}: M={M} not divisible by had_block_size={actual_had_bs}"
+            d_len = M
+        assert (actual_had_bs & (actual_had_bs - 1)) == 0, \
+            f"{name}: had block size {actual_had_bs} must be a power of 2"
         if randomize_hadamard:
             seed = hadamard_seed if hadamard_seed is not None \
-                   else hash(name) % (2 ** 31)
-            D = generate_random_signs(M, actual_had_bs, device, seed=seed)
+                   else _stable_seed(name)
+            D = generate_random_signs(d_len, actual_had_bs, device, seed=seed)
         else:
-            D = torch.ones(M, device=device)
+            D = torch.ones(d_len, device=device)
         module.D              = D.cpu()
         module.had_block_size = actual_had_bs
+        module.had_in_dim     = M
         D_dict[name]          = (D, actual_had_bs)
     print(f"  Generated D for {len(D_dict)} layers")
 
@@ -12079,9 +12304,9 @@ def calibrate_model_stochastic_fp4(
         D, actual_had_bs = D_dict[name]
 
         # ── Step 4b: W_had = H(W * D) ────────────────────────────────
-        W_had = fwht_blockwise(
-            W_mat * D.unsqueeze(0), actual_had_bs
-        ).cpu().float()
+        # _rotate zero-pads W_mat's columns up to len(D) before the FWHT,
+        # so W_had is [N, P] in the padded Hadamard domain.
+        W_had = _rotate(W_mat, D, actual_had_bs).cpu().float()
 
         W_orig_max = W_mat.abs().max().item()
         W_had_max  = W_had.abs().max().item()
@@ -12111,8 +12336,8 @@ def calibrate_model_stochastic_fp4(
         h_raw.remove()
 
         if act_sample is not None:
-            X_had_d = fwht_blockwise(
-                act_sample.to(device) * D.unsqueeze(0), actual_had_bs
+            X_had_d = _rotate(
+                act_sample.to(device), D, actual_had_bs
             ).cpu().float()
             X_hat_d = quantize_activations(
                 X_had_d.to(device), block_size, e_bits, m_bits,
@@ -12156,10 +12381,7 @@ def calibrate_model_stochastic_fp4(
 
         def _grab_had(mod, inp, out):
             x_raw = inp[0].detach().float().reshape(-1, inp[0].shape[-1])
-            x_had = fwht_blockwise(
-                x_raw * D.to(device=x_raw.device, dtype=x_raw.dtype),
-                actual_had_bs
-            )
+            x_had = _rotate(x_raw, D, actual_had_bs)
             had_acts.append(x_had.cpu())
 
         h_mu = module.register_forward_hook(_grab_had)
@@ -12208,8 +12430,14 @@ def calibrate_model_stochastic_fp4(
         del had_acts
 
         # ── Step 4f: store on wrapper (D and had_block_size already set in Phase 2)
-        module.weight_q       = res["weight_q"].view_as(
-                                    module.inner.linear.weight)
+        # weight_q lives in the padded Hadamard domain: shape [N, P] (P >= M),
+        # NOT the unpadded inner.linear.weight shape [N, M].
+        # Store in the model dtype (fp16), not fp32: the forward GEMM casts
+        # weight_q to the activation dtype anyway (step 5), so this is a
+        # numerical no-op that halves the dominant memory consumer — critical
+        # to keep the padded (1.6×) weight_q under a 16GB GPU during calibration.
+        module.weight_q       = res["weight_q"].reshape(W_had.shape).to(
+            module.inner.linear.weight.dtype)
         module.alpha_q        = res["alpha"]
         module.bias_q         = res["bias"]
         module.act_quant_mode = "nvfp4"
@@ -12218,8 +12446,7 @@ def calibrate_model_stochastic_fp4(
         # ── Step 4g: sanity check ─────────────────────────────────────
         with torch.no_grad():
             x_test  = torch.randn(4, 16, M, device=device)
-            x_had_t = fwht_blockwise(
-                x_test * D.unsqueeze(0).unsqueeze(0), actual_had_bs)
+            x_had_t = _rotate(x_test, D, actual_had_bs)
             if module.mu is not None:
                 x_had_t = x_had_t - module.mu.to(device=device,
                                                    dtype=x_had_t.dtype)
@@ -12228,8 +12455,7 @@ def calibrate_model_stochastic_fp4(
             if module.bias_correction is not None:
                 out_a16 = out_a16 + module.bias_correction.to(
                     device=device, dtype=out_a16.dtype)
-            x_had_q = fwht_blockwise(
-                x_test * D.unsqueeze(0).unsqueeze(0), actual_had_bs)
+            x_had_q = _rotate(x_test, D, actual_had_bs)
             if module.mu is not None:
                 x_had_q = x_had_q - module.mu.to(device=device,
                                                    dtype=x_had_q.dtype)
@@ -12248,6 +12474,12 @@ def calibrate_model_stochastic_fp4(
             print(f"  sanity rel_err A16={rel_a16:.4f}  A4={rel_a4:.4f}")
 
         del res, W_orig, W_mat, W_had
+        if lean:
+            # LEAN: drop this layer's original weight now that weight_q holds it.
+            # Bias is preserved (forward still reads inner.linear.bias). Only
+            # quantized layers reach here — skipped/retained layers keep their
+            # weights for the FP16 fallback forward.
+            module.inner.linear.weight = None
         torch.cuda.empty_cache()
 
     del D_dict, H_dict_had
@@ -12309,6 +12541,8 @@ def calibrate_model_gf4(
     hadamard_seed=None,
     compare_standard=True,
     alpha_candidates=(1.5, 2.0, 2.5, 3.0, 4.0),
+    extra_skip_patterns=(),
+    lean=False,
 ):
     """
     GF4 activation quantization variant of calibrate_model_stochastic_fp4.
@@ -12333,15 +12567,26 @@ def calibrate_model_gf4(
         randomize_hadamard=randomize_hadamard,
         hadamard_seed=hadamard_seed,
         compare_standard=compare_standard,
+        extra_skip_patterns=extra_skip_patterns,
+        lean=lean,
     )
 
     SKIP_LAYERS = {"lm_head", "embed_tokens", "embed_positions"}
+    SKIP_LAYERS |= set(extra_skip_patterns)
 
     print(f"\n{'='*60}")
     print("GF4 per-layer clip-ratio calibration")
     print(f"  α candidates: {list(alpha_candidates)}")
     print(f"{'='*60}")
 
+    # Collect every layer's post-Hadamard, post-μ activations in a SINGLE set
+    # of forward passes (one hook per layer at once), NOT one full-model forward
+    # per layer.  The old per-layer-forward loop ran num_batches full 2.7B
+    # forwards × 193 layers (≈O(L²)) and blew the wall-clock budget on a T4;
+    # this is num_batches forwards total — a ~Lx speedup with identical α* math.
+    MAX_CAL_TOKENS = 256   # per-layer token cap (speed + bounded CPU memory)
+
+    eligible = []
     for name, module in model.named_modules():
         if type(module).__name__ != "HadamardQuantLinearFP":
             continue
@@ -12349,51 +12594,68 @@ def calibrate_model_gf4(
             continue
         if module.had_block_size is None:
             continue
+        eligible.append((name, module))
 
-        actual_had_bs = module.had_block_size
-        D  = module.D.to(device) if module.D is not None else None
-        mu = module.mu.to(device).float() if module.mu is not None else None
+    # Run the capture forward with every layer already in "gf4" @ default clip
+    # so each layer sees the GF4-quantized upstream signal it gets at inference
+    # (closer than the old loop, which left downstream layers in "nvfp4").
+    for _, module in eligible:
+        module.act_quant_mode = "gf4"
+        module.act_clip_ratio = 2.5
 
-        # Collect post-Hadamard, post-μ activations (same signal the
-        # activation quantizer will see at inference time)
-        had_acts = []
+    had_acts  = {name: [] for name, _ in eligible}
+    tok_count = {name: 0  for name, _ in eligible}
 
-        def _grab_centered(mod, inp, out,
-                           _D=D, _mu=mu, _bs=actual_had_bs):
+    def _make_grab(_name, _D, _mu, _bs):
+        def _hook(mod, inp, out):
+            if tok_count[_name] >= MAX_CAL_TOKENS:
+                return
             x_raw = inp[0].detach().float().reshape(-1, inp[0].shape[-1])
             if _D is not None:
-                x_h = fwht_blockwise(
-                    x_raw * _D.to(device=x_raw.device), _bs)
+                x_h = _rotate(x_raw, _D, _bs)
             else:
+                if x_raw.shape[-1] < _bs:
+                    x_raw = F.pad(x_raw, (0, _bs - x_raw.shape[-1]))
                 x_h = fwht_blockwise(x_raw, _bs)
             if _mu is not None:
                 x_h = x_h - _mu.to(device=x_h.device)
-            had_acts.append(x_h.cpu())
+            x_h = x_h[:MAX_CAL_TOKENS - tok_count[_name]]
+            tok_count[_name] += x_h.shape[0]
+            had_acts[_name].append(x_h.cpu())
+        return _hook
 
-        h = module.register_forward_hook(_grab_centered)
-        with torch.no_grad():
-            n_coll = 0
-            for batch in calib_loader:
-                if batch is None:
-                    continue
-                x = batch[0] if isinstance(batch, (list, tuple)) else batch
-                if x is None:
-                    continue
-                model(x.to(device))
-                n_coll += 1
-                if n_coll >= num_batches:
-                    break
+    hooks = []
+    for name, module in eligible:
+        D  = module.D.to(device) if module.D is not None else None
+        mu = module.mu.to(device).float() if module.mu is not None else None
+        hooks.append(module.register_forward_hook(
+            _make_grab(name, D, mu, module.had_block_size)))
+
+    with torch.no_grad():
+        n_coll = 0
+        for batch in calib_loader:
+            if batch is None:
+                continue
+            x = batch[0] if isinstance(batch, (list, tuple)) else batch
+            if x is None:
+                continue
+            model(x.to(device))
+            n_coll += 1
+            if n_coll >= num_batches or all(
+                    tok_count[n] >= MAX_CAL_TOKENS for n, _ in eligible):
+                break
+    for h in hooks:
         h.remove()
 
-        if not had_acts:
+    # Per-layer α* search on the collected activations (cheap — no forwards).
+    for name, module in eligible:
+        if not had_acts[name]:
             module.act_clip_ratio = 2.5
             module.act_quant_mode = "gf4"
             print(f"  {name}: no activations collected, using α=2.5")
             continue
 
-        # Limit to 256 tokens for speed
-        X_cal = torch.cat(had_acts, dim=0).float()[:256].to(device)
-
+        X_cal = torch.cat(had_acts[name], dim=0).float()[:MAX_CAL_TOKENS].to(device)
         best_alpha = float(alpha_candidates[0])
         best_mse   = float('inf')
         for alpha in alpha_candidates:
@@ -12406,11 +12668,471 @@ def calibrate_model_gf4(
         print(f"  {name}: α*={best_alpha:.2f}  mse={best_mse:.6f}")
         module.act_clip_ratio = best_alpha
         module.act_quant_mode = "gf4"
-
-        del X_cal, had_acts
-        torch.cuda.empty_cache()
+        had_acts[name] = None
+        del X_cal
+    torch.cuda.empty_cache()
 
     return model
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Block-sequential OFFLOAD calibration — for models too big to fit on the GPU
+# ══════════════════════════════════════════════════════════════════════════
+#
+# calibrate_model_gf4 (above) needs the WHOLE model resident on the GPU: a
+# global Hessian forward, a global GF4 activation forward, and per-layer forwards
+# all run the full model. Even with lean=True (which frees originals) that caps
+# us at ~6.7B on a 24GB card, because the fake-quant weights themselves are the
+# floor (2 bytes/param → 13B = 26GB > 24GB).
+#
+# calibrate_model_gf4_offload produces the SAME per-layer quantization — identical
+# W_had rotation, calibrate_layer_stochastic_fp4, μ / bias_correction, GF4 α*
+# search — but walks the decoder ONE BLOCK AT A TIME, GPTQ/QuaRot style:
+#   • the model lives in CPU RAM;
+#   • one transformer block is moved to the GPU, quantized, and moved back;
+#   • hidden states are threaded block→block on the CPU.
+# Peak GPU memory becomes ONE block (+ its activations), so 13B/30B/70B fit a
+# 24GB L4 given enough CPU RAM to hold the model.
+#
+# This is NOT byte-identical to calibrate_model_gf4: the Hessian and μ for block
+# b are collected from inputs produced by the already-QUANTIZED blocks 0..b-1
+# (sequential error feedback), whereas the global path computes every layer's
+# Hessian on the fully-FP model. Sequential feedback is the GPTQ formulation and
+# is generally ≥ the parallel one; validate parity (offload vs global) on a
+# small model that fits both ways (opt-125m / opt-1.3b) before trusting big runs.
+
+class _StopForward(Exception):
+    """Raised by _Catcher to abort the forward once block-0 inputs are captured."""
+    pass
+
+
+class _Catcher(nn.Module):
+    """Temporarily replaces decoder block 0. Records the hidden-states of every
+    calibration sample plus the layer's non-hidden args/kwargs (attention_mask,
+    position_ids, position_embeddings, …), then aborts — the rest of the model
+    never runs, so this stays cheap and never needs the later blocks on-device."""
+    def __init__(self, block):
+        super().__init__()
+        self.block  = block
+        self.inps   = []
+        self.args   = None
+        self.kwargs = None
+
+    def forward(self, hidden_states, *args, **kwargs):
+        self.inps.append(hidden_states.detach().to("cpu"))
+        if self.kwargs is None:          # capture layer kwargs once (fixed seqlen)
+            self.args   = args
+            self.kwargs = kwargs
+        raise _StopForward
+
+
+def _move_kw(obj, device):
+    """Recursively move tensors in a (possibly nested) arg/kwarg structure to
+    device. Non-tensors (bools, ints, None) pass through untouched."""
+    if torch.is_tensor(obj):
+        return obj.to(device)
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_move_kw(o, device) for o in obj)
+    if isinstance(obj, dict):
+        return {k: _move_kw(v, device) for k, v in obj.items()}
+    return obj
+
+
+def _causal_mask_4d(seqlen, dtype, device):
+    """Additive [1,1,S,S] causal mask: 0 on/below the diagonal, finfo.min above.
+
+    When we replay a decoder block in isolation (offload calibration + streaming
+    eval) we bypass the model-level code that would normally build the causal
+    mask. transformers >= ~4.48 passes attention_mask=None down to the layer and
+    relies on SDPA's is_causal fallback (is_causal = mask is None and q_len > 1);
+    the unified attention interface drops that fallback, so an isolated block with
+    mask=None attends BIDIRECTIONALLY — every token sees the future, which inflates
+    perplexity uniformly across all modes. Forcing an explicit causal mask makes the
+    streamed forward correct regardless of transformers version or attn backend.
+    Our calib/eval sequences are dense (no padding), so a pure causal mask is exact.
+    """
+    min_val = torch.finfo(dtype).min
+    m = torch.full((seqlen, seqlen), min_val, dtype=dtype, device=device)
+    m = torch.triu(m, diagonal=1)
+    return m.view(1, 1, seqlen, seqlen)
+
+
+def _decoder_blocks_and_prep(model):
+    """Locate the decoder block ModuleList + the pre-block submodules needed to
+    turn input_ids into block-0 hidden states. Returns (blocks, prep_mods, family)."""
+    base = getattr(model, "model", model)
+    # OPT: model.model.decoder.{embed_tokens, embed_positions, project_in,
+    #      layernorm_embedding, layers}
+    dec = getattr(base, "decoder", None)
+    if dec is not None and hasattr(dec, "layers"):
+        prep = [getattr(dec, n, None) for n in
+                ("embed_tokens", "embed_positions", "project_in",
+                 "layernorm_embedding")]
+        return dec.layers, [m for m in prep if m is not None], "opt"
+    # Llama / Mistral: model.model.{embed_tokens, rotary_emb, layers}
+    if hasattr(base, "layers"):
+        prep = [getattr(base, n, None) for n in ("embed_tokens", "rotary_emb")]
+        return base.layers, [m for m in prep if m is not None], "llama"
+    raise ValueError("offload calibration: unsupported architecture "
+                     "(need an OPT- or Llama-style decoder)")
+
+
+def calibrate_model_gf4_offload(
+    model,
+    calib_loader,
+    block_size,
+    device,
+    e_bits=2,
+    m_bits=1,
+    e_bits_scale=4,
+    m_bits_scale=3,
+    num_batches=4,
+    n_samples=32,
+    had_block_size="auto",
+    randomize_hadamard=True,
+    hadamard_seed=None,
+    compare_standard=True,
+    alpha_candidates=(1.5, 2.0, 2.5, 3.0, 4.0),
+    extra_skip_patterns=(),
+    lean=True,                 # offload implies lean (originals freed per block)
+    max_cal_tokens=256,        # per-layer token cap for the GF4 α* search
+):
+    """Block-sequential offload version of calibrate_model_gf4 (see banner above).
+
+    Same per-layer math as calibrate_model_gf4; the model stays on CPU and blocks
+    are streamed to `device` one at a time. lean is forced True (each block's
+    originals are freed after its weight_q is written)."""
+    model.eval()
+    SKIP_LAYERS = {"lm_head", "embed_tokens", "embed_positions"} | set(extra_skip_patterns)
+    if extra_skip_patterns:
+        print(f"  [offload] extra skip patterns (kept FP16): {sorted(extra_skip_patterns)}")
+
+    # ── Phase 1: wrap linears (in place — blocks still forward normally) ──
+    model = wrap_layers_with_hadamard(model)
+    blocks, prep_mods, family = _decoder_blocks_and_prep(model)
+    n_blocks = len(blocks)
+    print(f"[offload] {family} decoder: {n_blocks} blocks — model on CPU, "
+          f"one block at a time on {device}")
+
+    # ── Phase 2: catch block-0 inputs for num_batches calib samples ──────
+    for m in prep_mods:
+        m.to(device)
+    orig_block0  = blocks[0]
+    catcher      = _Catcher(orig_block0)
+    blocks[0]    = catcher
+    with torch.no_grad():
+        for batch in calib_loader:
+            if batch is None:
+                continue
+            x = batch[0] if isinstance(batch, (list, tuple)) else batch
+            if x is None:
+                continue
+            try:
+                model(x.to(device))
+            except _StopForward:
+                pass
+            if len(catcher.inps) >= num_batches:
+                break
+    blocks[0]    = orig_block0
+    inps         = catcher.inps                 # list of [1,S,H] on CPU
+    layer_args   = catcher.args
+    layer_kwargs = dict(catcher.kwargs)
+    # Force a plain no-cache forward when we replay blocks in isolation.
+    layer_kwargs["use_cache"]        = False
+    layer_kwargs["output_attentions"] = False
+    for k in ("past_key_value", "past_key_values"):
+        if k in layer_kwargs:
+            layer_kwargs[k] = None
+    # Replaying a block in isolation bypasses the model-level causal-mask build;
+    # newer transformers ship attention_mask=None down to the layer, so force an
+    # explicit causal mask or the block attends bidirectionally (see _causal_mask_4d).
+    _S = inps[0].shape[1]
+    layer_kwargs["attention_mask"] = _causal_mask_4d(_S, inps[0].dtype, "cpu")
+    for m in prep_mods:
+        m.to("cpu")
+    del catcher
+    gc.collect()
+    torch.cuda.empty_cache()
+    print(f"[offload] captured {len(inps)} block-0 input samples; "
+          f"layer kwargs: {sorted(layer_kwargs.keys())}")
+
+    comparison_log = {}
+
+    # ── Phase 3: per-block quantization ──────────────────────────────────
+    for b, block in enumerate(blocks):
+        block.to(device)
+        l_args   = _move_kw(layer_args,   device)
+        l_kwargs = _move_kw(layer_kwargs, device)
+
+        # wrappers in this block (relative name) that we will quantize
+        wrappers = [
+            (nm, mod) for nm, mod in block.named_modules()
+            if type(mod).__name__ == "HadamardQuantLinearFP"
+            and not any(s in nm for s in SKIP_LAYERS)
+        ]
+        if not wrappers:
+            # e.g. a block that is entirely skip-listed — just thread inputs.
+            new_inps = []
+            with torch.no_grad():
+                for inp in inps:
+                    out = block(inp.to(device), *l_args, **l_kwargs)
+                    out = out[0] if isinstance(out, tuple) else out
+                    new_inps.append(out.detach().to("cpu"))
+            inps = new_inps
+            block.to("cpu"); del l_args, l_kwargs
+            gc.collect(); torch.cuda.empty_cache()
+            print(f"[offload] block {b + 1}/{n_blocks}: no quantizable layers, threaded")
+            continue
+
+        # ── 3a: generate D + set Hadamard geometry on each wrapper ────────
+        for nm, module in wrappers:
+            W_shape = module.inner.linear.weight.data.shape
+            M = W_shape[1] if len(W_shape) == 2 else W_shape[1] * W_shape[2] * W_shape[3]
+            if had_block_size == "auto":
+                actual_had_bs = _next_pow2(M); d_len = actual_had_bs
+            else:
+                actual_had_bs = had_block_size
+                assert M % actual_had_bs == 0, \
+                    f"{nm}: M={M} not divisible by had_block_size={actual_had_bs}"
+                d_len = M
+            assert (actual_had_bs & (actual_had_bs - 1)) == 0, \
+                f"{nm}: had block size {actual_had_bs} must be a power of 2"
+            if randomize_hadamard:
+                seed = hadamard_seed if hadamard_seed is not None \
+                       else _stable_seed(f"{b}.{nm}")
+                D = generate_random_signs(d_len, actual_had_bs, device, seed=seed)
+            else:
+                D = torch.ones(d_len, device=device)
+            module.D              = D.cpu()
+            module.had_block_size = actual_had_bs
+            module.had_in_dim     = M
+
+        # ── 3b: one FP forward over inps → H_had + μ (online) + α* acts ───
+        H_acc   = {}                                   # nm -> [block hessians]
+        mu_sum  = {nm: None for nm, _ in wrappers}     # nm -> running Σ x_had
+        mu_cnt  = {nm: 0    for nm, _ in wrappers}
+        cal_acc = {nm: []   for nm, _ in wrappers}     # capped rotated acts
+        cal_tok = {nm: 0    for nm, _ in wrappers}
+
+        def _make_hook(nm, module):
+            D_ref = module.D.to(device)
+            hbs   = module.had_block_size
+            inner = module.inner.linear
+            def hook(mod, inp, out):
+                x     = inp[0].detach().float().reshape(-1, inp[0].shape[-1])
+                x_had = _rotate(x, D_ref, hbs)
+                Hb = compute_hessian_blocks(x_had, inner, block_size)
+                if Hb is not None:
+                    if nm not in H_acc:
+                        H_acc[nm] = Hb
+                    else:
+                        for i in range(len(Hb)):
+                            H_acc[nm][i] += Hb[i]
+                s = x_had.sum(dim=0).cpu()
+                mu_sum[nm] = s if mu_sum[nm] is None else mu_sum[nm] + s
+                mu_cnt[nm] += x_had.shape[0]
+                if cal_tok[nm] < max_cal_tokens:
+                    take = x_had[:max_cal_tokens - cal_tok[nm]].cpu()
+                    cal_acc[nm].append(take); cal_tok[nm] += take.shape[0]
+            return hook
+
+        # This forward runs the block with FP weights (nothing in it is quantized
+        # yet — 3c does that below), so the captured block output is the FP-domain
+        # activation. Threading THAT to the next block keeps every block's Hessian
+        # on the fully-FP model, exactly like the in-GPU path, which computes H_had
+        # for all layers up front before any quantization. (Threading the QUANTIZED
+        # output instead compounds quant noise in deep blocks' Hessians → PPL grows
+        # with depth: fine at 12 blocks, +3 PPL at 24, worse at 80.)
+        handles = [module.register_forward_hook(_make_hook(nm, module))
+                   for nm, module in wrappers]
+        next_inps = []
+        with torch.no_grad():
+            for inp in inps:
+                out = block(inp.to(device), *l_args, **l_kwargs)
+                out = out[0] if isinstance(out, tuple) else out
+                next_inps.append(out.detach().to("cpu"))
+        for h in handles:
+            h.remove()
+        n_fwd = max(len(inps), 1)
+
+        # ── 3c: per-layer quantize (reuse the exact global math) ──────────
+        for nm, module in wrappers:
+            if nm not in H_acc:
+                print(f"  [offload] {b}.{nm}: no Hessian collected, skipping")
+                continue
+            H_blocks = [h.float() / n_fwd for h in H_acc[nm]]
+            D, actual_had_bs = module.D.to(device), module.had_block_size
+
+            W_orig = module.inner.linear.weight.data.to(device).float()
+            W_mat  = W_orig.view(W_orig.shape[0], -1) if W_orig.dim() == 4 else W_orig
+            W_had  = _rotate(W_mat, D, actual_had_bs).cpu().float()
+
+            res = calibrate_layer_stochastic_fp4(
+                layer_name=f"{b}.{nm}", W_orig=W_had, H_blocks=H_blocks,
+                block_size=block_size, e_bits=e_bits, m_bits=m_bits,
+                e_bits_scale=e_bits_scale, m_bits_scale=m_bits_scale,
+                device=device, n_samples=n_samples, compare_standard=compare_standard,
+            )
+            if compare_standard:
+                comparison_log[f"{b}.{nm}"] = {
+                    "method": res["method"],
+                    "err_standard": res.get("err_standard", float("nan")),
+                    "err_stochastic": res.get("err_stochastic", float("nan")),
+                }
+
+            # μ and bias_correction (μ = E[H(D·x)] over all collected tokens)
+            mu = (mu_sum[nm] / max(mu_cnt[nm], 1)).to(device).float()
+            W_had_q   = res["weight_q"].to(device).float()
+            bias_corr = (W_had_q @ mu).cpu()
+            existing_bias = module.inner.linear.bias
+            if existing_bias is not None:
+                module.inner.linear.bias.data = (
+                    existing_bias.data.float() + bias_corr.to(device)
+                ).to(existing_bias.dtype)
+                module.bias_correction = None
+            else:
+                module.bias_correction = bias_corr.half()
+            module.mu = mu.half()
+
+            module.weight_q       = res["weight_q"].reshape(W_had.shape).to(
+                module.inner.linear.weight.dtype)
+            module.alpha_q        = res["alpha"]
+            module.bias_q         = res["bias"]
+            module.act_block_size = block_size
+
+            # GF4 per-layer α* search on the collected (rotated, μ-subtracted) acts
+            if cal_acc[nm]:
+                X_cal = torch.cat(cal_acc[nm], dim=0).float().to(device)
+                X_cal = X_cal - mu.to(X_cal.dtype)
+                best_alpha, best_mse = float(alpha_candidates[0]), float("inf")
+                for alpha in alpha_candidates:
+                    X_q = quantize_activations_gf4(X_cal, block_size, clip_ratio=alpha)
+                    mse = (X_cal - X_q).pow(2).mean().item()
+                    if mse < best_mse:
+                        best_mse, best_alpha = mse, float(alpha)
+                module.act_clip_ratio = best_alpha
+                del X_cal
+            else:
+                module.act_clip_ratio = 2.5
+            module.act_quant_mode = "gf4"
+
+            if lean:
+                module.inner.linear.weight = None
+            del W_orig, W_mat, W_had, res, W_had_q
+            torch.cuda.empty_cache()
+
+        # ── 3d: thread the FP block outputs (captured in 3b) to the next block ─
+        inps = next_inps
+
+        del H_acc, mu_sum, cal_acc, next_inps, l_args, l_kwargs
+        block.to("cpu")
+        gc.collect(); torch.cuda.empty_cache()
+        print(f"[offload] block {b + 1}/{n_blocks} quantized "
+              f"({len(wrappers)} layers), GPU freed")
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    if comparison_log:
+        n_stoch = sum(1 for v in comparison_log.values() if v["method"] == "stochastic")
+        n_std   = sum(1 for v in comparison_log.values() if v["method"] == "standard")
+        print(f"\n{'='*60}\n[offload] GF4 calibration summary:")
+        print(f"  layers: {len(comparison_log)} "
+              f"(stochastic {n_stoch} / standard {n_std})\n{'='*60}")
+    return model
+
+
+def _post_block_tail(model, family):
+    """Return (tail_modules, lm_head): the modules applied AFTER the decoder
+    blocks to turn the last hidden state into logits, for block-major eval."""
+    lm_head = getattr(model, "lm_head", None)
+    if family == "opt":
+        dec  = model.model.decoder
+        tail = [m for m in (getattr(dec, "final_layer_norm", None),
+                            getattr(dec, "project_out", None)) if m is not None]
+    else:  # llama / neox style
+        base = getattr(model, "model", model)
+        tail = [m for m in (getattr(base, "norm", None),
+                            getattr(base, "final_layer_norm", None)) if m is not None]
+    return tail, lm_head
+
+
+@torch.no_grad()
+def evaluate_ppl_offload(model, ids, device, seqlen=2048):
+    """Block-major streaming perplexity for a model too big to fit on `device`.
+
+    The model stays on CPU; each decoder block is moved to the GPU ONCE, forwards
+    every eval chunk, and is moved back — so peak GPU memory is one block plus the
+    (small) embeddings + final-norm + lm_head, not the whole model. This is the
+    eval-time counterpart of calibrate_model_gf4_offload and lets 13B/70B evaluate
+    on a 24GB card. It reads whatever act_quant_mode is currently set on the
+    HadamardQuantLinearFP wrappers, so it drops into the same
+    `with act_quant_mode(model, mode=...)` loop as the in-GPU ppl_eval.
+
+    Block-major (each block streamed once for ALL chunks) rather than chunk-major
+    keeps block transfers at O(num_blocks) per call instead of
+    O(num_blocks × num_chunks).
+    """
+    model.eval()
+    blocks, prep_mods, family = _decoder_blocks_and_prep(model)
+    tail_mods, lm_head = _post_block_tail(model, family)
+
+    n = ids.size(0) // seqlen
+    chunks = ids[:n * seqlen].view(n, seqlen)
+
+    # The non-block parts are small — keep them resident on the GPU.
+    for m in prep_mods + tail_mods + ([lm_head] if lm_head is not None else []):
+        m.to(device)
+
+    # ── capture block-0 inputs (mode-independent) for every chunk ──────────
+    orig_block0 = blocks[0]
+    catcher     = _Catcher(orig_block0)
+    blocks[0]   = catcher
+    for i in range(n):
+        try:
+            model(chunks[i:i + 1].to(device))
+        except _StopForward:
+            pass
+    blocks[0]    = orig_block0
+    hs           = catcher.inps                    # list of n [1,S,H] on CPU
+    layer_args   = catcher.args
+    layer_kwargs = dict(catcher.kwargs)
+    layer_kwargs["use_cache"]         = False
+    layer_kwargs["output_attentions"] = False
+    for k in ("past_key_value", "past_key_values"):
+        if k in layer_kwargs:
+            layer_kwargs[k] = None
+    # Force an explicit causal mask — streamed blocks bypass the model-level mask
+    # build and newer transformers pass attention_mask=None (see _causal_mask_4d).
+    layer_kwargs["attention_mask"] = _causal_mask_4d(seqlen, hs[0].dtype, "cpu")
+    del catcher
+    l_args   = _move_kw(layer_args,   device)
+    l_kwargs = _move_kw(layer_kwargs, device)
+
+    # ── stream each block once over all chunks ────────────────────────────
+    for block in blocks:
+        block.to(device)
+        for i in range(n):
+            out   = block(hs[i].to(device), *l_args, **l_kwargs)
+            out   = out[0] if isinstance(out, tuple) else out
+            hs[i] = out.detach().to("cpu")
+        block.to("cpu")
+        gc.collect(); torch.cuda.empty_cache()
+
+    # ── tail (final norm / project_out) + lm_head + NLL, one chunk at a time ─
+    nll, ntok = 0.0, 0
+    for i in range(n):
+        h = hs[i].to(device)
+        for tm in tail_mods:
+            h = tm(h)
+        logits = lm_head(h)
+        sl = logits[:, :-1, :].contiguous()
+        lb = chunks[i:i + 1][:, 1:].contiguous().to(device)
+        loss = F.cross_entropy(sl.view(-1, sl.size(-1)), lb.view(-1))
+        if not (torch.isnan(loss) or torch.isinf(loss)):
+            nll += loss.item() * (seqlen - 1); ntok += (seqlen - 1)
+        hs[i] = None
+        del h, logits, sl, lb
+    torch.cuda.empty_cache()
+    return math.exp(nll / ntok) if ntok else float("inf")
 
 
 def calibrate_model_gf4_hsmooth(
@@ -12483,8 +13205,12 @@ def calibrate_model_gf4_hsmooth(
 
         def _grab(mod, inp, out, _D=D, _mu=mu, _bs=actual_had_bs):
             x_raw = inp[0].detach().float().reshape(-1, inp[0].shape[-1])
-            x_h = fwht_blockwise(x_raw * _D.to(x_raw.device), _bs) \
-                  if _D is not None else fwht_blockwise(x_raw, _bs)
+            if _D is not None:
+                x_h = _rotate(x_raw, _D, _bs)
+            else:
+                if x_raw.shape[-1] < _bs:
+                    x_raw = F.pad(x_raw, (0, _bs - x_raw.shape[-1]))
+                x_h = fwht_blockwise(x_raw, _bs)
             if _mu is not None:
                 x_h = x_h - _mu.to(x_h.device)
             had_acts.append(x_h.cpu())
@@ -12521,10 +13247,105 @@ def calibrate_model_gf4_hsmooth(
         W_q = module.weight_q.data.to(device).float()
         W_q_smooth = W_q * s.unsqueeze(0)                              # [N, M]
         if 'weight_q' in module.inner._buffers:
+            orig = module.inner._buffers['weight_q']
             module.inner._buffers['weight_q'] = \
-                W_q_smooth.to(module.inner._buffers['weight_q'].dtype).cpu()
+                W_q_smooth.to(dtype=orig.dtype, device=orig.device)
         else:
-            module.inner.weight_q = W_q_smooth.to(module.weight_q.dtype).cpu()
+            orig = module.inner.weight_q
+            module.inner.weight_q = W_q_smooth.to(dtype=orig.dtype, device=orig.device)
+
+        del X, s, W_q, W_q_smooth
+        torch.cuda.empty_cache()
+
+    return model
+
+
+def apply_gf4_hsmooth(
+    model,
+    calib_loader,
+    block_size,
+    device,
+    num_batches=4,
+    smooth_eps=1e-6,
+):
+    """
+    Apply H-domain SmoothQuant to an ALREADY-CALIBRATED model in-place.
+
+    Unlike calibrate_model_gf4_hsmooth, this does NOT re-run weight
+    quantization. Use this when the model has already been wrapped and
+    calibrated via quantize_model_fp / calibrate_model_gf4.
+
+    Sets module.h_smooth_scale and folds s into module.weight_q for each
+    HadamardQuantLinearFP layer. Restoring is the caller's responsibility.
+    """
+    SKIP = {"lm_head", "embed_tokens", "embed_positions"}
+
+    print(f"\n{'='*60}")
+    print("H-domain per-channel smooth scaling (apply post-hoc)")
+    print(f"{'='*60}")
+
+    for name, module in model.named_modules():
+        if type(module).__name__ != "HadamardQuantLinearFP":
+            continue
+        if any(s in name for s in SKIP):
+            continue
+        if module.had_block_size is None or module.weight_q is None:
+            continue
+
+        actual_had_bs = module.had_block_size
+        D  = module.D.to(device) if module.D is not None else None
+        mu = module.mu.to(device).float() if module.mu is not None else None
+
+        had_acts = []
+
+        def _grab(mod, inp, out, _D=D, _mu=mu, _bs=actual_had_bs):
+            x_raw = inp[0].detach().float().reshape(-1, inp[0].shape[-1])
+            if _D is not None:
+                x_h = _rotate(x_raw, _D, _bs)
+            else:
+                if x_raw.shape[-1] < _bs:
+                    x_raw = F.pad(x_raw, (0, _bs - x_raw.shape[-1]))
+                x_h = fwht_blockwise(x_raw, _bs)
+            if _mu is not None:
+                x_h = x_h - _mu.to(x_h.device)
+            had_acts.append(x_h.cpu())
+
+        h = module.register_forward_hook(_grab)
+        with torch.no_grad():
+            n_coll = 0
+            for batch in calib_loader:
+                if batch is None:
+                    continue
+                x = batch[0] if isinstance(batch, (list, tuple)) else batch
+                if x is None:
+                    continue
+                model(x.to(device))
+                n_coll += 1
+                if n_coll >= num_batches:
+                    break
+        h.remove()
+
+        if not had_acts:
+            continue
+
+        X = torch.cat(had_acts, dim=0).float().to(device)
+
+        s = X.pow(2).mean(dim=0).sqrt().clamp(min=smooth_eps)
+        s = s / s.mean().clamp(min=1e-8)
+
+        print(f"  {name}: s ∈ [{s.min():.3f}, {s.max():.3f}]  std={s.std():.4f}")
+
+        module.h_smooth_scale = s.cpu()
+
+        W_q = module.weight_q.data.to(device).float()
+        W_q_smooth = W_q * s.unsqueeze(0)
+        if 'weight_q' in module.inner._buffers:
+            orig = module.inner._buffers['weight_q']
+            module.inner._buffers['weight_q'] = \
+                W_q_smooth.to(dtype=orig.dtype, device=orig.device)
+        else:
+            orig = module.inner.weight_q
+            module.inner.weight_q = W_q_smooth.to(dtype=orig.dtype, device=orig.device)
 
         del X, s, W_q, W_q_smooth
         torch.cuda.empty_cache()
@@ -12552,9 +13373,17 @@ def quantize_model_fp(model,
                       had_block_size=256,       # Hadamard block size; "auto" = full row
                       use_gf4=False,            # Gaussian-optimal GF4 activation quant
                       gf4_variant="gf4",        # "gf4" | "hsmooth" | "learned" | "learned_per_layer"
+                      extra_skip_patterns=(),   # layer name substrings kept in FP16 (e.g. Llama "down_proj")
+                      lean=False,               # free per-layer originals during weight-quant (fits 6.7B/7B on 24GB)
+                      offload=False,            # block-sequential CPU-offload calibration (fits 13B/30B/70B on 24GB)
                       ):
     """
     Quantize a model to FP4-like format with optional HG or Hessian calibration.
+
+    extra_skip_patterns: iterable of layer-name substrings. Any matching layer
+        is left in FP16 (exact fallback path, no Hadamard/quantization). Use for
+        matrices that destabilize a given architecture — e.g. ("down_proj",) for
+        Llama SwiGLU, or ("q_proj", "k_proj") to protect RoPE projections.
     """
 
     model = fold_bn_recursively(model)
@@ -12651,11 +13480,27 @@ def quantize_model_fp(model,
                     n_samples=32,
                     had_block_size=had_block_size,
                     compare_standard=True,
+                    extra_skip_patterns=extra_skip_patterns,
+                    lean=lean,
                 )
                 model = calibrate_gf4_learned_levels(
                     model, data_loader, device, block_size,
                     num_batches=num_calib_batches,
                     per_layer=(gf4_variant == "learned_per_layer"),
+                )
+            elif offload:
+                print("Using block-sequential OFFLOAD Hadamard+GF4 calibration "
+                      "(model on CPU, one block at a time on GPU)")
+                model = calibrate_model_gf4_offload(
+                    model, data_loader, block_size, device,
+                    e_bits=e_bits, m_bits=m_bits,
+                    e_bits_scale=e_bits_scale, m_bits_scale=m_bits_scale,
+                    num_batches=num_calib_batches,
+                    n_samples=32,
+                    had_block_size=had_block_size,
+                    compare_standard=True,
+                    extra_skip_patterns=extra_skip_patterns,
+                    lean=True,   # offload frees originals per block
                 )
             else:
                 print("Using Hadamard-domain calibration with GF4 activation quantization")
@@ -12667,6 +13512,8 @@ def quantize_model_fp(model,
                     n_samples=32,
                     had_block_size=had_block_size,
                     compare_standard=True,
+                    extra_skip_patterns=extra_skip_patterns,
+                    lean=lean,
                 )
         else:
             print("Using Hadamard-domain calibration")
@@ -12678,6 +13525,8 @@ def quantize_model_fp(model,
                 n_samples=32,
                 had_block_size=had_block_size,
                 compare_standard=True,
+                extra_skip_patterns=extra_skip_patterns,
+                lean=lean,
             )
     elif joint:
         print("Using joint calibration")
@@ -12711,7 +13560,12 @@ def quantize_model_fp(model,
         print("Using standard calibration")
         model = calibrate_model(model, data_loader, device)
 
-    apply_pruning_mask(model)
+    if not lean and not offload:
+        # apply_pruning_mask reads the ORIGINAL weights (module.linear.weight) to
+        # build a sparsity mask; lean/offload freed those. For dense (non-pruned)
+        # models the mask is all-ones — a no-op — so skipping it changes nothing
+        # here. (Don't use lean/offload with a pre-pruned model.)
+        apply_pruning_mask(model)
 
     # ── Weight statistics ─────────────────────────────────────────────────
     for name, module in model.named_modules():
@@ -12724,6 +13578,10 @@ def quantize_model_fp(model,
                   f"zeros={(wq.abs() < 1e-8).float().mean():.3f}")
 
     # ── Quick sanity check on first quantized layer ───────────────────────
+    # Skipped in lean/offload mode: the originals were freed during weight-quant,
+    # so the orig-vs-quant comparison below would dereference a None weight.
+    if lean or offload:
+        return model
     for name, module in model.named_modules():
         if hasattr(module, 'weight_q') and module.weight_q is not None:
             # Decomposed modules use normal_indices for the FP4 weight
@@ -12732,18 +13590,27 @@ def quantize_model_fp(model,
                 x_test = torch.randn(1, module.linear.weight.shape[1]).to(device)
                 out_orig  = module.linear(x_test)
                 out_quant = module(x_test)
-            else:
-                if type(module).__name__ == "HadamardQuantLinearFP":
-                    in_f  = module.inner.linear.in_features
-                else:                    
-                    in_f  = module.linear.in_features
-                x_test = torch.randn(1, in_f, dtype=module.inner.linear.weight.dtype).to(device)
-                module.weight_q = module.weight_q.to(module.inner.linear.weight.dtype)
-                # module.linear.bias.dtype = module.weight_q.dtype
+            elif type(module).__name__ == "HadamardQuantLinearFP":
+                # weight_q lives in the padded Hadamard domain [N, P>=M] and
+                # expects rotated+padded input, so a raw F.linear(x, weight_q)
+                # is a shape/semantics mismatch.  Run the module's own forward,
+                # which applies H(D*pad(x)) - μ before the GEMM, against the
+                # original linear for the reference.
+                in_f   = module.inner.linear.in_features
+                x_test = torch.randn(
+                    1, in_f, dtype=module.inner.linear.weight.dtype
+                ).to(device)
                 out_orig  = F.linear(x_test, module.inner.linear.weight,
                                      module.inner.linear.bias)
+                out_quant = module(x_test)
+            else:
+                in_f  = module.linear.in_features
+                x_test = torch.randn(1, in_f, dtype=module.linear.weight.dtype).to(device)
+                module.weight_q = module.weight_q.to(module.linear.weight.dtype)
+                out_orig  = F.linear(x_test, module.linear.weight,
+                                     module.linear.bias)
                 out_quant = F.linear(x_test, module.weight_q,
-                                     module.inner.linear.bias)
+                                     module.linear.bias)
 
             print(f"{name}: orig_max={out_orig.abs().max():.4f}, "
                   f"quant_max={out_quant.abs().max():.4f}")
@@ -12752,6 +13619,75 @@ def quantize_model_fp(model,
             break
 
     return model
+
+
+def quantize_model_fp_lean(*args, **kwargs):
+    """Memory-lean entry point: identical to quantize_model_fp but frees each
+    layer's ORIGINAL weight during weight-quant (lean=True), halving the resident
+    peak (~2x -> ~1x model) so 6.7B/7B fit a 24GB GPU. Same numerical result; the
+    orig-vs-quant post-calibration sanity check is skipped (originals are gone)."""
+    kwargs["lean"] = True
+    return quantize_model_fp(*args, **kwargs)
+
+
+def quantize_model_fp_offload(*args, **kwargs):
+    """Block-sequential CPU-offload entry point. The model stays in CPU RAM and
+    is quantized one decoder block at a time on the GPU (GPTQ/QuaRot style), so
+    13B/30B/70B fit a 24GB card given enough system RAM to hold the model. Only
+    the Hadamard+GF4 path (use_gf4=True, gf4_variant='gf4') is supported. Not
+    byte-identical to the in-GPU path — it uses sequential error feedback — so
+    validate parity on a small model (opt-125m/1.3b) first."""
+    kwargs["offload"] = True
+    return quantize_model_fp(*args, **kwargs)
+
+
+# ── Architecture-specific skip presets ───────────────────────────────────────
+#
+# Some weight matrices destabilize Hadamard+FP4 quantization for specific
+# architectures. Layers matching these substrings are kept in FP16 (exact
+# fallback path) rather than quantized.
+#
+# Llama (RMSNorm, SwiGLU, RoPE) differs from OPT (LayerNorm, GeLU MLP):
+#   • down_proj — SwiGLU output projection. Its input is silu(gate)·up, a
+#     heavy-tailed product with extreme outliers (dim 8192 for Llama-1b).
+#     The activation-weighted Hessian is dominated by these outliers, so the
+#     reconstructed weight is mismatched to typical inputs → PPL collapse.
+#   • RMSNorm does not center activations (unlike LayerNorm), so inputs to all
+#     linears carry a non-zero, token-varying mean that the single calibrated
+#     μ cannot fully cancel — most damaging on the widest projections.
+LLAMA_SKIP_PATTERNS = ("down_proj",)
+LLAMA_SKIP_PATTERNS_AGGRESSIVE = ("down_proj", "gate_proj", "up_proj")
+
+
+def quantize_model_fp_llama(model, data_loader, *,
+                            skip_patterns=LLAMA_SKIP_PATTERNS,
+                            **kwargs):
+    """
+    Llama-aware entry point for quantize_model_fp.
+
+    Identical to quantize_model_fp but defaults to Hadamard+GF4 calibration
+    with the Llama skip preset (down_proj kept in FP16). Pass
+    skip_patterns=LLAMA_SKIP_PATTERNS_AGGRESSIVE to also keep the SwiGLU
+    gate/up projections in FP16, or any custom tuple of name substrings.
+
+    All other quantize_model_fp keyword arguments (e_bits, block_size,
+    had_block_size, gf4_variant, device, …) pass through unchanged.
+
+    Example:
+        model = quantize_model_fp_llama(
+            model, calib_loader,
+            block_size=16, e_bits=2, m_bits=1,
+            e_bits_scale=4, m_bits_scale=3,
+            device=device, had_block_size="auto",
+        )
+    """
+    kwargs.setdefault("Hadamard", True)
+    kwargs.setdefault("use_gf4", True)
+    return quantize_model_fp(
+        model, data_loader,
+        extra_skip_patterns=tuple(skip_patterns),
+        **kwargs,
+    )
 
 
 

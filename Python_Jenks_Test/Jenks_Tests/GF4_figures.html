@@ -1,0 +1,430 @@
+<style>
+  :root{
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    /* page chrome — adapts to theme */
+    --bg:#e7eaef; --bg2:#dde1e8; --fg:#1a1e25; --fg-dim:#5b6470; --hair:#c7cdd6;
+    --accent:#2743d4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0c0e12; --bg2:#12151b; --fg:#e8eaef; --fg-dim:#9aa2ae; --hair:#252a33; --accent:#7d92ff; }
+  }
+  :root[data-theme="light"]{ --bg:#e7eaef; --bg2:#dde1e8; --fg:#1a1e25; --fg-dim:#5b6470; --hair:#c7cdd6; --accent:#2743d4; }
+  :root[data-theme="dark"]{ --bg:#0c0e12; --bg2:#12151b; --fg:#e8eaef; --fg-dim:#9aa2ae; --hair:#252a33; --accent:#7d92ff; }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);
+       line-height:1.5;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:1080px;margin:0 auto;padding:56px 24px 96px;}
+
+  header{border-bottom:1px solid var(--hair);padding-bottom:22px;margin-bottom:40px;}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;
+          color:var(--accent);margin:0 0 10px;}
+  h1{font-size:clamp(26px,4vw,40px);line-height:1.08;margin:0 0 12px;letter-spacing:-.02em;
+     text-wrap:balance;font-weight:680;}
+  .lede{max-width:64ch;color:var(--fg-dim);font-size:16px;margin:0;}
+  .legend{display:flex;flex-wrap:wrap;gap:16px 26px;margin-top:22px;font-family:var(--mono);font-size:12.5px;color:var(--fg-dim);}
+  .legend span{display:inline-flex;align-items:center;gap:8px;}
+  .sw{width:26px;height:0;border-top-width:3px;border-top-style:solid;display:inline-block;}
+  .sw.dot{width:11px;height:11px;border-radius:50%;border-top:0;}
+
+  /* figure plates — kept on a bright sheet in BOTH themes, like a filing */
+  .plate{
+    --ink:#141821; --acc:#2743d4; --acc-soft:#2743d4; --mut:#98a0ac; --err:#b3384a;
+    --grid:#e4e8ee; --sheet:#ffffff; --sheet2:#f5f7fa;
+    background:var(--sheet); color:var(--ink);
+    border:1px solid var(--hair); border-radius:4px;
+    margin:0 0 30px; overflow:hidden;
+    box-shadow:0 1px 0 rgba(0,0,0,.04), 0 14px 34px -22px rgba(20,30,60,.35);
+  }
+  .titleblock{display:flex;justify-content:space-between;align-items:baseline;gap:16px;
+      padding:14px 20px;border-bottom:1px solid var(--grid);background:var(--sheet2);}
+  .fig-no{font-family:var(--mono);font-weight:700;font-size:13px;letter-spacing:.06em;color:var(--acc);}
+  .fig-ttl{font-family:var(--sans);font-weight:640;font-size:15px;color:var(--ink);flex:1;}
+  .fig-meta{font-family:var(--mono);font-size:11px;color:#9aa1ac;letter-spacing:.04em;white-space:nowrap;}
+  .canvas{padding:22px 20px 8px;overflow-x:auto;}
+  .canvas svg{display:block;width:100%;height:auto;min-width:520px;}
+  .caption{padding:4px 20px 18px;font-size:13.5px;color:#4c5563;max-width:78ch;}
+  .caption b{color:var(--ink);font-weight:640;}
+  .note{font-family:var(--mono);font-size:12px;color:#6b7480;padding:0 20px 18px;}
+
+  /* shared SVG primitives (scoped to plate tokens) */
+  .ax{stroke:var(--ink);stroke-width:2;fill:none;}
+  .tk{stroke:var(--ink);stroke-width:1.6;}
+  .tk.soft{stroke:var(--mut);}
+  .grid{stroke:var(--grid);stroke-width:1;}
+  .bellf{fill:var(--acc);opacity:.07;}
+  .bell{stroke:var(--acc);stroke-width:1.6;fill:none;opacity:.5;}
+  .lvl{fill:var(--acc);}
+  .lvlo{fill:var(--mut);}
+  .box{fill:var(--sheet);stroke:var(--ink);stroke-width:1.8;}
+  .box.g{fill:var(--sheet2);}
+  .box.acc{stroke:var(--acc);}
+  .flow{stroke:var(--ink);stroke-width:1.8;fill:none;}
+  .flow.acc{stroke:var(--acc);}
+  text{font-family:var(--mono);fill:var(--ink);}
+  .t{font-size:12px;} .ts{font-size:10.5px;} .tt{font-size:13px;font-weight:700;}
+  .tmut{fill:#7b828d;} .tacc{fill:var(--acc);} .terr{fill:var(--err);}
+  .center{text-anchor:middle;} .end{text-anchor:end;}
+  .sans{font-family:var(--sans);}
+  .footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--hair);
+          font-family:var(--mono);font-size:12px;color:var(--fg-dim);}
+</style>
+
+<div class="wrap">
+  <header>
+    <p class="kicker">Invention Figures · GF4 4-bit datatype</p>
+    <h1>Gaussian-Optimal 4-Bit Quantization — Values, Method, Hardware</h1>
+    <p class="lede">A drafting set for the disclosure: what the codebook <em>is</em>, why its levels sit where they do, how it quantizes weights and activations, how it compares to prior 4-bit formats, and how it decodes in silicon.</p>
+    <div class="legend">
+      <span><i class="sw dot" style="background:var(--accent)"></i> GF4 (invention)</span>
+      <span><i class="sw dot" style="background:#98a0ac"></i> prior formats (INT4 / E2M1 / NF4)</span>
+      <span><i class="sw" style="border-top-color:#b3384a"></i> quantization error / tail</span>
+    </div>
+  </header>
+
+  <!-- ================= FIG 1 : THE VALUES ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 1</span>
+      <span class="fig-ttl">The GF4 value set — 16 codes, symmetric about zero</span>
+      <span class="fig-meta">1 sign bit + 3-bit magnitude index</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 300" role="img" aria-label="GF4 levels on a number line under a Gaussian curve">
+        <path class="bellf" d="M7.2,228.1 L500,80 L992.8,228.1 L992.8,230 L7.2,230 Z" opacity=".05"/>
+        <path class="bell" d="M7.2,228.1 L16.0,227.7 L60.0,225.3 L104.0,220.9 L148.0,213.6 L192.0,202.5 L236.0,186.9 L280.0,166.9 L324.0,143.8 L368.0,120.2 L412.0,99.4 L456.0,85.1 L500.0,80.0 L544.0,85.1 L588.0,99.4 L632.0,120.2 L676.0,143.8 L720.0,166.9 L764.0,186.9 L808.0,202.5 L852.0,213.6 L896.0,220.9 L940.0,225.3 L984.0,227.7 L992.8,228.1"/>
+        <line class="ax" x1="40" y1="230" x2="960" y2="230"/>
+        <!-- levels: positive x then mirror -->
+        <g>
+          <!-- dots + ticks -->
+          <g>
+            <!-- positive -->
+            <circle class="lvl" cx="500" cy="230" r="4.5"/><line class="tk" x1="500" y1="230" x2="500" y2="214"/>
+            <circle class="lvl" cx="535" cy="230" r="4.5"/><line class="tk" x1="535" y1="230" x2="535" y2="214"/>
+            <circle class="lvl" cx="576.4" cy="230" r="4.5"/><line class="tk" x1="576.4" y1="230" x2="576.4" y2="214"/>
+            <circle class="lvl" cx="624.5" cy="230" r="4.5"/><line class="tk" x1="624.5" y1="230" x2="624.5" y2="214"/>
+            <circle class="lvl" cx="673.9" cy="230" r="4.5"/><line class="tk" x1="673.9" y1="230" x2="673.9" y2="214"/>
+            <circle class="lvl" cx="731" cy="230" r="4.5"/><line class="tk" x1="731" y1="230" x2="731" y2="214"/>
+            <circle class="lvl" cx="806.3" cy="230" r="4.5"/><line class="tk" x1="806.3" y1="230" x2="806.3" y2="214"/>
+            <circle class="lvl" cx="940" cy="230" r="4.5"/><line class="tk" x1="940" y1="230" x2="940" y2="214"/>
+            <!-- negative mirror -->
+            <circle class="lvl" cx="465" cy="230" r="4.5"/><line class="tk" x1="465" y1="230" x2="465" y2="214"/>
+            <circle class="lvl" cx="423.6" cy="230" r="4.5"/><line class="tk" x1="423.6" y1="230" x2="423.6" y2="214"/>
+            <circle class="lvl" cx="375.5" cy="230" r="4.5"/><line class="tk" x1="375.5" y1="230" x2="375.5" y2="214"/>
+            <circle class="lvl" cx="326.1" cy="230" r="4.5"/><line class="tk" x1="326.1" y1="230" x2="326.1" y2="214"/>
+            <circle class="lvl" cx="269" cy="230" r="4.5"/><line class="tk" x1="269" y1="230" x2="269" y2="214"/>
+            <circle class="lvl" cx="193.7" cy="230" r="4.5"/><line class="tk" x1="193.7" y1="230" x2="193.7" y2="214"/>
+            <circle class="lvl" cx="60" cy="230" r="4.5"/><line class="tk" x1="60" y1="230" x2="60" y2="214"/>
+          </g>
+        </g>
+        <!-- magnitude labels (positive side) -->
+        <g class="ts tmut center">
+          <text x="500" y="250">0</text>
+          <text x="535" y="262">.080</text>
+          <text x="576.4" y="250">.174</text>
+          <text x="624.5" y="262">.283</text>
+          <text x="673.9" y="250">.395</text>
+          <text x="731" y="262">.525</text>
+          <text x="806.3" y="250">.696</text>
+          <text x="940" y="250">1.0</text>
+        </g>
+        <text class="ts tmut center" x="60" y="250">−1.0</text>
+        <text class="t center" x="500" y="284">value  =  sign  ×  magnitude-level   ·   (then × per-block scale)</text>
+        <!-- brace annotation -->
+        <text class="ts tacc end" x="955" y="206">dense near 0 · sparse in the tail</text>
+      </svg>
+    </div>
+    <p class="caption"><b>Eight magnitudes, mirrored by a sign bit.</b> The stored table is
+      <span style="font-family:var(--mono)">{0, .0796, .1737, .2829, .3953, .5251, .6962, 1.0}</span>.
+      Levels crowd near zero and spread toward ±1, so most of a bell-shaped operand lands on a finely-spaced level.
+      Symmetry means the hardware needs only one sign bit and an 8-entry magnitude table.</p>
+  </figure>
+
+  <!-- ================= FIG 2 : WHY (EQUAL MASS) ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 2</span>
+      <span class="fig-ttl">Where the levels come from — eight equal-probability slices</span>
+      <span class="fig-meta">half-normal N(0,1), each slice = ⅛ of the mass</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 320" role="img" aria-label="Half Gaussian divided into eight equal-area slices">
+        <defs><clipPath id="bellClip"><path d="M120,250 L120.0,70.0 L297.6,102.5 L475.2,168.9 L652.8,220.1 L830.4,242.6 L985.8,248.4 L985.8,250 Z"/></clipPath></defs>
+        <!-- equal-area shaded strips, clipped to the curve -->
+        <g clip-path="url(#bellClip)">
+          <rect x="120"   y="60" width="58.9"  height="200" fill="var(--acc)" opacity=".20"/>
+          <rect x="178.9" y="60" width="69.6"  height="200" fill="var(--acc)" opacity=".12"/>
+          <rect x="248.5" y="60" width="80.8"  height="200" fill="var(--acc)" opacity=".20"/>
+          <rect x="329.3" y="60" width="83.2"  height="200" fill="var(--acc)" opacity=".12"/>
+          <rect x="412.5" y="60" width="96.1"  height="200" fill="var(--acc)" opacity=".20"/>
+          <rect x="508.6" y="60" width="126.6" height="200" fill="var(--acc)" opacity=".12"/>
+          <rect x="635.2" y="60" width="224.8" height="200" fill="var(--acc)" opacity=".20"/>
+          <rect x="860"   y="60" width="126"   height="200" fill="var(--err)" opacity=".14"/>
+        </g>
+        <path class="bell" style="opacity:.85" d="M120.0,70.0 L142.2,70.6 L186.6,75.0 L231.0,83.5 L275.4,95.5 L319.8,110.2 L364.2,126.5 L408.6,143.7 L453.0,160.7 L497.4,176.9 L541.8,191.6 L586.2,204.5 L630.6,215.4 L675.0,224.3 L719.4,231.4 L763.8,236.9 L808.2,241.0 L852.6,244.0 L897.0,246.0 L941.4,247.5 L985.8,248.4"/>
+        <line class="ax" x1="120" y1="250" x2="960" y2="250"/>
+        <!-- dividers at each level (equal-mass boundary), up to the curve -->
+        <g class="tk soft">
+          <line x1="178.9" y1="250" x2="178.9" y2="74.6"/>
+          <line x1="248.5" y1="250" x2="248.5" y2="88"/>
+          <line x1="329.3" y1="250" x2="329.3" y2="113.8"/>
+          <line x1="412.5" y1="250" x2="412.5" y2="145.5"/>
+          <line x1="508.6" y1="250" x2="508.6" y2="180.8"/>
+          <line x1="635.2" y1="250" x2="635.2" y2="216.3"/>
+          <line x1="860"   y1="250" x2="860"   y2="244.4"/>
+        </g>
+        <!-- level dots on axis -->
+        <g class="lvl">
+          <circle cx="120" cy="250" r="4.5"/><circle cx="178.9" cy="250" r="4.5"/><circle cx="248.5" cy="250" r="4.5"/>
+          <circle cx="329.3" cy="250" r="4.5"/><circle cx="412.5" cy="250" r="4.5"/><circle cx="508.6" cy="250" r="4.5"/>
+          <circle cx="635.2" cy="250" r="4.5"/><circle cx="860" cy="250" r="4.5"/>
+        </g>
+        <!-- 1/8 labels -->
+        <g class="ts center" fill="#5b6470">
+          <text x="149" y="242">⅛</text><text x="213" y="242">⅛</text><text x="289" y="242">⅛</text>
+          <text x="371" y="242">⅛</text><text x="460" y="242">⅛</text><text x="572" y="242">⅛</text>
+          <text x="748" y="242">⅛</text>
+        </g>
+        <text class="ts terr center" x="915" y="242">tail</text>
+        <text class="ts tmut center" x="120" y="270">0</text>
+        <text class="ts tmut center" x="860" y="270">1.0</text>
+        <text class="t center" x="540" y="298">equal area per slice  →  a level is placed at each slice boundary  →  equal expected error</text>
+      </svg>
+    </div>
+    <p class="caption"><b>Equal probability, not equal width.</b> Split the bell into eight slices that each hold ⅛ of the
+      probability and put a level at every boundary. Near the peak the slices are narrow (fine levels); in the sparse
+      tail one slice is wide (a single coarse level). That is exactly what minimizes average error for Gaussian data —
+      and the reason GF4 spends its 16 codes where the values actually are.</p>
+  </figure>
+
+  <!-- ================= FIG 3 : HOW OURS DIFFERS ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 3</span>
+      <span class="fig-ttl">How GF4 differs from prior 4-bit formats</span>
+      <span class="fig-meta">same axis · same bit budget · different level placement</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 380" role="img" aria-label="INT4 versus E2M1 versus GF4 level placement">
+        <!-- faint shared density on each row -->
+        <g>
+          <!-- ROW 1 INT4 -->
+          <g transform="translate(0,40)">
+            <path class="bell" style="opacity:.28" d="M80,58.6 L155.6,55.5 L231.2,48.9 L306.8,37.9 L382.4,24.9 L458,15.6 L500,14 L546.2,15.9 L621.8,25.6 L697.4,38.6 L773,49.3 L848.6,55.8 L924.2,58.7"/>
+            <line class="ax" x1="80" y1="60" x2="920" y2="60"/>
+            <g class="lvlo">
+              <circle cx="80" cy="60" r="4"/><circle cx="140" cy="60" r="4"/><circle cx="200" cy="60" r="4"/><circle cx="260" cy="60" r="4"/><circle cx="320" cy="60" r="4"/><circle cx="380" cy="60" r="4"/><circle cx="440" cy="60" r="4"/><circle cx="500" cy="60" r="4"/><circle cx="560" cy="60" r="4"/><circle cx="620" cy="60" r="4"/><circle cx="680" cy="60" r="4"/><circle cx="740" cy="60" r="4"/><circle cx="800" cy="60" r="4"/><circle cx="860" cy="60" r="4"/><circle cx="920" cy="60" r="4"/>
+            </g>
+            <text class="tt" x="80" y="24">INT4</text>
+            <text class="ts tmut" x="150" y="24">uniform steps — codes wasted in the empty tails, too few near the busy centre</text>
+          </g>
+          <!-- ROW 2 E2M1 -->
+          <g transform="translate(0,160)">
+            <path class="bell" style="opacity:.28" d="M80,58.6 L155.6,55.5 L231.2,48.9 L306.8,37.9 L382.4,24.9 L458,15.6 L500,14 L546.2,15.9 L621.8,25.6 L697.4,38.6 L773,49.3 L848.6,55.8 L924.2,58.7"/>
+            <line class="ax" x1="80" y1="60" x2="920" y2="60"/>
+            <g class="lvlo">
+              <circle cx="500" cy="60" r="4"/><circle cx="535" cy="60" r="4"/><circle cx="570" cy="60" r="4"/><circle cx="605" cy="60" r="4"/><circle cx="640" cy="60" r="4"/><circle cx="710" cy="60" r="4"/><circle cx="780" cy="60" r="4"/><circle cx="920" cy="60" r="4"/>
+              <circle cx="465" cy="60" r="4"/><circle cx="430" cy="60" r="4"/><circle cx="395" cy="60" r="4"/><circle cx="360" cy="60" r="4"/><circle cx="290" cy="60" r="4"/><circle cx="220" cy="60" r="4"/><circle cx="80" cy="60" r="4"/>
+            </g>
+            <text class="tt" x="80" y="24">E2M1 / FP4</text>
+            <text class="ts tmut" x="215" y="24">exponent–mantissa — even ratios, not even mass; a big gap opens before ±1</text>
+          </g>
+          <!-- ROW 3 GF4 -->
+          <g transform="translate(0,280)">
+            <path class="bellf" d="M80,58.6 L500,14 L924.2,58.7 L924.2,60 L80,60 Z" opacity=".10"/>
+            <path class="bell" style="opacity:.55" d="M80,58.6 L155.6,55.5 L231.2,48.9 L306.8,37.9 L382.4,24.9 L458,15.6 L500,14 L546.2,15.9 L621.8,25.6 L697.4,38.6 L773,49.3 L848.6,55.8 L924.2,58.7"/>
+            <line class="ax" x1="80" y1="60" x2="920" y2="60"/>
+            <g class="lvl">
+              <circle cx="500" cy="60" r="4.4"/><circle cx="533.4" cy="60" r="4.4"/><circle cx="573" cy="60" r="4.4"/><circle cx="618.8" cy="60" r="4.4"/><circle cx="666" cy="60" r="4.4"/><circle cx="720.5" cy="60" r="4.4"/><circle cx="792.4" cy="60" r="4.4"/><circle cx="920" cy="60" r="4.4"/>
+              <circle cx="466.6" cy="60" r="4.4"/><circle cx="427" cy="60" r="4.4"/><circle cx="381.2" cy="60" r="4.4"/><circle cx="334" cy="60" r="4.4"/><circle cx="279.5" cy="60" r="4.4"/><circle cx="207.6" cy="60" r="4.4"/><circle cx="80" cy="60" r="4.4"/>
+            </g>
+            <text class="tt tacc" x="80" y="24">GF4</text>
+            <text class="ts tacc" x="150" y="24">equal Gaussian mass — level density tracks the curve; resolution where the data lives</text>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <p class="caption"><b>Same 16 codes, placed by three different rules.</b> INT4 spaces levels evenly and squanders
+      them in the tails; E2M1 spaces them by powers of two and leaves an uneven gap; GF4 spaces them by probability
+      mass, so its dots hug the density curve. Under the rotation of FIG. 4 the operands really are bell-shaped, so
+      GF4's placement is the matched one.</p>
+  </figure>
+
+  <!-- ================= FIG 4 : HOW IT WORKS ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 4</span>
+      <span class="fig-ttl">How a block is quantized</span>
+      <span class="fig-meta">rotate → scale → snap → reconstruct</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 300" role="img" aria-label="Quantization pipeline flow">
+        <defs><marker id="ah4" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--ink)"/></marker></defs>
+        <!-- boxes -->
+        <g>
+          <rect class="box" x="16"  y="70" width="140" height="70" rx="4"/>
+          <rect class="box acc" x="192" y="70" width="128" height="70" rx="4"/>
+          <rect class="box" x="356" y="70" width="128" height="70" rx="4"/>
+          <rect class="box" x="520" y="70" width="140" height="70" rx="4"/>
+          <rect class="box g" x="696" y="70" width="128" height="70" rx="4"/>
+          <rect class="box acc" x="860" y="70" width="128" height="70" rx="4"/>
+        </g>
+        <g class="flow" marker-end="url(#ah4)">
+          <line x1="156" y1="105" x2="188" y2="105"/>
+          <line x1="320" y1="105" x2="352" y2="105"/>
+          <line x1="484" y1="105" x2="516" y2="105"/>
+          <line x1="660" y1="105" x2="692" y2="105"/>
+          <line x1="824" y1="105" x2="856" y2="105"/>
+        </g>
+        <!-- box labels -->
+        <g class="center">
+          <text class="t" x="86" y="100">activation /</text><text class="t" x="86" y="116">weight block</text><text class="ts tmut" x="86" y="132">16 values</text>
+          <text class="t tacc" x="256" y="100">Hadamard</text><text class="t tacc" x="256" y="116">rotate</text><text class="ts tmut" x="256" y="132">→ Gaussian</text>
+          <text class="t" x="420" y="100">scale =</text><text class="t" x="420" y="116">RMS × 2.5</text><text class="ts tmut" x="420" y="132">per block</text>
+          <text class="t" x="590" y="100">normalise</text><text class="t" x="590" y="116">|x|/scale, clamp</text><text class="ts tmut" x="590" y="132">to [0,1]</text>
+          <text class="t" x="760" y="100">nearest</text><text class="t" x="760" y="116">level (LUT)</text><text class="ts tmut" x="760" y="132">→ 4-bit code</text>
+          <text class="t tacc" x="924" y="100">reconstruct</text><text class="t tacc" x="924" y="116">x̂ = s·scale·L</text><text class="ts tmut" x="924" y="132">on decode</text>
+        </g>
+        <!-- worked example strip -->
+        <rect x="16" y="196" width="972" height="72" rx="4" fill="var(--sheet2)" stroke="var(--grid)"/>
+        <text class="ts tmut" x="30" y="218">WORKED EXAMPLE — one element</text>
+        <g class="t">
+          <text x="30" y="244">x = +0.42</text>
+          <text x="168" y="244" class="tmut">RMS = 0.30</text>
+          <text x="300" y="244">scale = 0.30×2.5 = 0.75</text>
+          <text x="540" y="244" class="tmut">|x|/scale = 0.56</text>
+          <text x="720" y="244" class="tacc">snap → level .525</text>
+          <text x="30" y="262" class="tacc">x̂ = +1 × 0.75 × 0.525 = +0.394</text>
+          <text x="360" y="262" class="terr">error 0.026</text>
+          <text x="520" y="262" class="tmut">stored code = (sign +, index 5) = 4 bits</text>
+        </g>
+      </svg>
+    </div>
+    <p class="caption"><b>Per block: rotate, set one scale, snap each value to the nearest table level.</b> The rotation
+      makes the block Gaussian; a single RMS-based scale (≈2.5σ at full scale) puts the bulk on the fine levels and lets
+      rare outliers saturate. Only a 4-bit code per value and one scale per block are stored; the value is rebuilt as
+      <span style="font-family:var(--mono)">sign × scale × level</span> at decode.</p>
+  </figure>
+
+  <!-- ================= FIG 5 : HARDWARE ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 5</span>
+      <span class="fig-ttl">Hardware decode datapath</span>
+      <span class="fig-meta">4-bit code → sign + index → 8-entry ROM → scale → MAC</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 360" role="img" aria-label="GF4 hardware decode datapath into a MAC array">
+        <defs><marker id="ah5" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--ink)"/></marker>
+          <marker id="ah5a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--acc)"/></marker></defs>
+
+        <!-- memory -->
+        <rect class="box g" x="16" y="120" width="150" height="100" rx="4"/>
+        <text class="t center" x="91" y="150">4-bit packed</text>
+        <text class="t center" x="91" y="167">operands</text>
+        <text class="ts tmut center" x="91" y="188">weights + acts</text>
+        <text class="ts tmut center" x="91" y="205">¼ the bytes</text>
+
+        <!-- one code split -->
+        <rect class="box" x="210" y="140" width="150" height="60" rx="4"/>
+        <text class="ts tmut center" x="285" y="132">one 4-bit code</text>
+        <line x1="285" y1="140" x2="285" y2="200" class="grid"/>
+        <rect x="210" y="140" width="40" height="60" fill="var(--acc)" opacity=".12"/>
+        <text class="ts center" x="230" y="166">s</text><text class="ts center tmut" x="230" y="182">sign</text>
+        <text class="ts center" x="305" y="166">i₂ i₁ i₀</text><text class="ts center tmut" x="305" y="182">index</text>
+
+        <!-- ROM -->
+        <rect class="box acc" x="430" y="70" width="180" height="200" rx="4"/>
+        <text class="tt tacc center" x="520" y="94">8-entry magnitude ROM</text>
+        <g class="ts center">
+          <text x="520" y="118">0 : 0.0000</text>
+          <text x="520" y="136">1 : 0.0796</text>
+          <text x="520" y="154">2 : 0.1737</text>
+          <text x="520" y="172">3 : 0.2829</text>
+          <text x="520" y="190">4 : 0.3953</text>
+          <text x="520" y="208">5 : 0.5251</text>
+          <text x="520" y="226">6 : 0.6962</text>
+          <text x="520" y="244">7 : 1.0000</text>
+        </g>
+
+        <!-- negate mux -->
+        <rect class="box" x="672" y="120" width="70" height="60" rx="4"/>
+        <text class="t center" x="707" y="147">±</text>
+        <text class="ts tmut center" x="707" y="196">negate</text>
+        <text class="ts tmut center" x="707" y="210">by sign</text>
+
+        <!-- scale multiply -->
+        <circle class="box" cx="812" cy="150" r="26"/>
+        <text class="tt center" x="812" y="156">×</text>
+        <text class="ts tmut center" x="812" y="196">block</text>
+        <text class="ts tmut center" x="812" y="210">scale</text>
+        <rect class="box g" x="770" y="250" width="84" height="42" rx="4"/>
+        <text class="ts center" x="812" y="270">per-block</text><text class="ts center" x="812" y="284">scale reg</text>
+
+        <!-- MAC -->
+        <rect class="box acc" x="890" y="110" width="96" height="120" rx="4"/>
+        <text class="t tacc center" x="938" y="150">MAC</text>
+        <text class="t tacc center" x="938" y="168">array</text>
+        <text class="ts tmut center" x="938" y="200">Σ w·x</text>
+
+        <!-- flows -->
+        <g class="flow" marker-end="url(#ah5)">
+          <line x1="166" y1="170" x2="206" y2="170"/>
+          <line x1="360" y1="170" x2="426" y2="120"/>            <!-- index to ROM -->
+          <line x1="610" y1="150" x2="668" y2="150"/>            <!-- ROM to negate -->
+          <line x1="812" y1="254" x2="812" y2="180"/>           <!-- scale reg up -->
+        </g>
+        <path class="flow" d="M250,150 C270,150 250,100 430,100" marker-end="url(#ah5)"/>  <!-- sign to negate area (routing) -->
+        <g class="flow acc" marker-end="url(#ah5a)">
+          <line x1="742" y1="150" x2="784" y2="150"/>            <!-- negate to × -->
+          <line x1="838" y1="150" x2="886" y2="150"/>            <!-- × to MAC -->
+        </g>
+        <text class="ts tmut" x="255" y="96">sign routes to negate</text>
+        <text class="ts tmut center" x="285" y="230">1 sign bit + 3 index bits</text>
+      </svg>
+    </div>
+    <p class="caption"><b>Decode is a table lookup plus a sign — then a shared multiply.</b> Codes are stored and moved at
+      4 bits (¼ the bandwidth). In the datapath the 3 index bits address a small fixed <b>magnitude ROM</b>, the sign bit
+      optionally negates, and one <b>per-block scale</b> multiply reconstructs the operand before it enters the MAC array.
+      The ROM can instead be a writable register file to load a learned per-model table.</p>
+  </figure>
+
+  <!-- ================= FIG 6 : MULTI-PASS ================= -->
+  <figure class="plate">
+    <div class="titleblock"><span class="fig-no">FIG. 6</span>
+      <span class="fig-ttl">Precision dial — accumulate several codes</span>
+      <span class="fig-meta">residual / multi-pass on the same 4-bit engine</span></div>
+    <div class="canvas">
+      <svg viewBox="0 0 1000 240" role="img" aria-label="Residual multi-pass accumulator loop">
+        <defs><marker id="ah6" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" fill="var(--ink)"/></marker></defs>
+        <rect class="box" x="40" y="60" width="150" height="66" rx="4"/>
+        <text class="t center" x="115" y="88">residual</text><text class="t center" x="115" y="106">r = x − Q</text>
+        <rect class="box acc" x="270" y="60" width="150" height="66" rx="4"/>
+        <text class="t tacc center" x="345" y="88">GF4</text><text class="t tacc center" x="345" y="106">quantize r</text>
+        <rect class="box g" x="500" y="60" width="180" height="66" rx="4"/>
+        <text class="t center" x="590" y="88">wide accumulator</text><text class="t center" x="590" y="106">Q ← Q + GF4(r)</text>
+        <rect class="box" x="760" y="60" width="150" height="66" rx="4"/>
+        <text class="t center" x="835" y="93">output Q</text>
+
+        <g class="flow" marker-end="url(#ah6)">
+          <line x1="190" y1="93" x2="266" y2="93"/>
+          <line x1="420" y1="93" x2="496" y2="93"/>
+          <line x1="680" y1="93" x2="756" y2="93"/>
+        </g>
+        <!-- feedback -->
+        <path class="flow" d="M590,126 L590,170 L115,170 L115,126" marker-end="url(#ah6)"/>
+        <text class="ts tmut center" x="352" y="163">feed Q back — next pass quantizes what's left</text>
+
+        <!-- dial -->
+        <g class="ts">
+          <text class="tt" x="40" y="212">DIAL</text>
+          <text x="110" y="212">P=1 → W4A4 (~3 eff. bits)</text>
+          <text class="tacc" x="360" y="212">P=2 → ≈ 16-bit activations</text>
+          <text x="640" y="212">P=3–4 → recover outlier layers, no FP16 unit</text>
+        </g>
+      </svg>
+    </div>
+    <p class="caption"><b>One 4-bit datapath, adjustable precision.</b> Each extra pass quantizes the leftover residual and
+      adds it on the accumulator — roughly +1.5 effective bits per pass, since the residual of Gaussian data is again
+      Gaussian. Ordinary layers run at one pass; sensitive ("outlier") layers run at more, so the whole network stays on
+      a single GF4 engine with no dedicated wide-precision unit.</p>
+  </figure>
+
+  <p class="footer">Figures are schematic, for disclosure use. Level values, block size (per-16 shown), clip ratio
+    (2.5), and outlier-layer set to be confirmed against the final results table before filing.</p>
+</div>

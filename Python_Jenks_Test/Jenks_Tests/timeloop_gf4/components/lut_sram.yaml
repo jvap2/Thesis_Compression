@@ -1,0 +1,51 @@
+# Compound: global buffer with DECODE-AT-CHIP-INGRESS.
+#
+# The LUT fires on the FILL from DRAM (storage.write) — each operand is decoded
+# ONCE as it enters the chip.  DRAM (and the bandwidth-critical off-chip path)
+# stays 4-bit; the on-chip buffer + PEs hold decoded values.  LUT reads then
+# scale with DRAM->buffer traffic (≈ one decode per operand, fully amortized),
+# the most aggressive amortization of the codebook cost.  Tradeoff: the on-chip
+# buffer stores wider decoded values (area), modeled by storage width.
+compound_components:
+  version: 0.3
+  classes:
+    - name: lut_sram
+      attributes:
+        technology: "45nm"
+        depth: 16384
+        width: 256
+      subcomponents:
+        - name: storage
+          class: SRAM
+          attributes:
+            depth: 16384
+            width: 256
+            block-size: 64
+            word-bits: 4
+            n_banks: 8
+            read_bandwidth: 32
+            write_bandwidth: 32
+        - name: lut
+          class: regfile
+          attributes: { depth: 16, width: 8, datawidth: 8 }
+      actions:
+        - name: write              # FILL from DRAM: decode on chip ingress
+          subcomponents:
+            - name: storage
+              actions: [{name: write}]
+            - name: lut
+              actions: [{name: read}]
+        - name: read
+          subcomponents:
+            - name: storage
+              actions: [{name: read}]
+        - name: update
+          subcomponents:
+            - name: storage
+              actions: [{name: update}]
+        - name: idle
+          subcomponents:
+            - name: storage
+              actions: [{name: idle}]
+            - name: lut
+              actions: [{name: idle}]

@@ -1,0 +1,57 @@
+# Compound component: a LUT-FP4 multiply-accumulate PE.
+#
+# This is the unit that makes our Gaussian-codebook GF4 runnable on an FP4
+# datapath: the operands moved/stored are 4-bit CODES; a small 16-entry LUT
+# (programmable codebook) remaps each code to its level value before the
+# multiplier.  Versus a fixed-E2M1 PE (nvfp4_engine), the ONLY hardware delta
+# is this 16-entry LUT — Timeloop/Accelergy will price its energy + area.
+#
+# A "mac_random" = decode 2 operands (weight code + activation code) via the
+# LUT, then one int MAC on the decoded low-bit values.
+compound_components:
+  version: 0.3
+  classes:
+    - name: lut_fp4_mac
+      attributes:
+        technology: "45nm"
+        datawidth: 4              # 4-bit operand codes (FP4 density)
+        lut_entries: 16           # E2M1-replacement programmable codebook
+        lut_width: 8              # decoded level stored at 8b (E3M4-ish)
+      subcomponents:
+        - name: lut
+          class: regfile          # tiny 16x8b codebook SRAM at the PE
+          attributes:
+            depth: 16
+            width: 8
+            datawidth: 8
+            n_rdwr_ports: 2
+        - name: mac
+          class: intmac           # multiplier+adder on decoded low-bit operands
+          attributes:
+            datawidth: 4
+            width: 4
+      actions:
+        - name: mac_random
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: read, repeat: 2}    # weight code + activation code
+            - name: mac
+              actions:
+                - {name: mac_random}
+        - name: mac_gated
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: idle}
+            - name: mac
+              actions:
+                - {name: mac_gated}
+        - name: idle
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: idle}
+            - name: mac
+              actions:
+                - {name: idle}

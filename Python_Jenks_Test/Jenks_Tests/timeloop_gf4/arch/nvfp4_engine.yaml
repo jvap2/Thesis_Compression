@@ -1,0 +1,45 @@
+# NVFP4 baseline architecture — IDENTICAL to gf4_engine.yaml except each PE uses
+# a plain intmac (hardwired E2M1 decode, ~free ROM) instead of the lut_fp4_mac.
+# Running both decks on the same problems isolates the LUT energy + area cost.
+architecture:
+  version: 0.3
+  subtree:
+    - name: NVFP4_Engine
+      attributes:
+        technology: "45nm"
+      local:
+        - name: DRAM
+          class: DRAM
+          attributes:
+            type: "LPDDR4"
+            width: 64
+            block-size: 16
+            word-bits: 4
+      subtree:
+        - name: chip
+          local:
+            - name: global_buffer
+              class: SRAM
+              attributes:
+                depth: 16384
+                width: 256
+                block-size: 64
+                word-bits: 4
+                n_banks: 8
+                read_bandwidth: 32
+                write_bandwidth: 32
+          subtree:
+            - name: PE[0..255]
+              local:
+                - name: weight_reg
+                  class: regfile
+                  attributes: { depth: 64, width: 4, word-bits: 4, block-size: 1, meshX: 16 }
+                - name: input_reg
+                  class: regfile
+                  attributes: { depth: 64, width: 4, word-bits: 4, block-size: 1, meshX: 16 }
+                - name: psum_reg
+                  class: regfile
+                  attributes: { depth: 16, width: 24, word-bits: 24, block-size: 1, meshX: 16 }
+                - name: mac
+                  class: fp4_mac
+                  attributes: { datawidth: 4, meshX: 16 }

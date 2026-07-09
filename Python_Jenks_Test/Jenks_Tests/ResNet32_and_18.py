@@ -1,6 +1,9 @@
 from models import ResNet56
 import torch
-torch.set_float32_matmul_precision('highest')
+torch.set_float32_matmul_precision('high')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 from custom_optimizer import JenksSGD,PruneWeights, JenksSGD_Noise, SAM, JenksSGD_Test, PruneWeights_Test, train_one_step, Prune_Score_Mag
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
@@ -45,8 +48,10 @@ from rcnet import create_ResNet18, create_ResNet32
 from utils import calculate_normalisation_params, RandomContrast, RandomGamma, TinyImageNetDataset
 print(torch.cuda.is_available())
 
-one_shot = True
-prune_ratio = 1
+one_shot = False        # iterative layerwise Jenks: re-prune every 5 epochs from prune_epoch
+prune_ratio = 0.95      # cutoff: stop pruning once sparsity reaches this, then recover (CIFAR-100: 90% to keep capacity)
+import cuda_helpers
+cuda_helpers.OVER_PRUNE = 0.0    # pure Jenks (~89% sparsity); accuracy push, no extra cut
 torch.cuda.empty_cache()
 # train_val_dataset = datasets.MNIST(root="./datasets/", train=True, download=True)
 # test_dataset = datasets.MNIST(root="./datasets/", train=False, download=True)
@@ -66,7 +71,7 @@ mask = True
 decl_ETF = False
 TinyImageNet_PATH = "./datasets/tiny-imagenet-200/"
 CIFAR10_PATH = "./datasets"
-datasets_name = 'tiny_imagenet'  # 'cifar10' , 'cifar100', 'tiny_imagenet'
+datasets_name = 'cifar100'  # 'cifar10' , 'cifar100', 'tiny_imagenet'
 if datasets_name == 'tiny_imagenet':
     num_classes = 200
     test = True
@@ -134,6 +139,7 @@ if datasets_name == 'cifar10':
                                 # transforms.RandomEqualize(),
                                 transforms.ToTensor(),
                                 normalize_4,
+                                transforms.RandomErasing(p=0.25),
                             ]))
     val_dataset = datasets.CIFAR10(CIFAR10_PATH, train=False,
                                     transform=transforms.Compose([
@@ -154,6 +160,7 @@ elif datasets_name == 'cifar100':
                                 transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10),
                                 transforms.ToTensor(),
                                 normalize_3,
+                                transforms.RandomErasing(p=0.25),
                             ]))
     val_dataset = datasets.CIFAR100(CIFAR100_PATH, train=False,
                                     transform=transforms.Compose([
@@ -171,11 +178,13 @@ depth = 32
 if depth == 18:
     model = create_ResNet18(num_classes=num_classes)
 elif depth == 32:
-    model = resnet32(num_classes=num_classes, test_firstlayer=True, test_lastlayer=True)
-BATCH_SIZE = 256
+    model = resnet32(num_classes=num_classes, test_firstlayer=False, test_lastlayer=False)
+BATCH_SIZE = 350
 AGD = False
-train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
-val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
+train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=8, pin_memory=True, persistent_workers=True, prefetch_factor=4)
+val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True,
+                            num_workers=4, pin_memory=True, persistent_workers=True, prefetch_factor=4)
 gain = 1
 xavier = True
 
@@ -194,22 +203,26 @@ if AGD:
 # model = torch.compile(model, mode="reduce-overhead", backend="inductor")
 model = model.to(device)
 # print(model)  
-min_epochs = 500
-label_smoothing = 0.0
+min_epochs = 350
+label_smoothing = 0.1
 loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 momentum = 0.99
-learning_rate = 1e-1
-weight_decay = 1e-4
-bias_weight_decay = 1e-4
+learning_rate = 5e-2
+weight_decay = 5e-4
+bias_weight_decay = 2e-4
 warmup_epochs = 10
 nestrov = True
 params = []
 bias_lr = True
-prune_epoch =  400
+prune_epoch =  175
 
 optimizer = init_lr_weight_decay(model, learning_rate, weight_decay,bias_weight_decay=bias_weight_decay, momentum=momentum, nestrov=nestrov, bias_lr=bias_lr, elem_bias = True, warmup_epochs=warmup_epochs, prune_epoch=prune_epoch)
 init_network(optimizer)
-EPOCHS = 500
+EPOCHS = 350
+# MixUp/CutMix to gain accuracy headroom; off for final 20 epochs (clean fine-tune).
+import custom_optimizer
+custom_optimizer.MIXUP = True    # on for CIFAR-100: hard 100-class task, +3.9% on VGG; not capacity-starved at 90%
+custom_optimizer.MIXUP_OFF_EPOCH = EPOCHS - 20
 # scheduler = WarmupMultiStepLR(optimizer, milestones=[80, 120, 140], warmup_factor=0.1, warmup_iters=10, warmup_method="linear")
 adj = False
 schedule = True
@@ -217,7 +230,8 @@ schedule = True
 gamma = .875
 warmup_epochs_2 = 10
 two_schedulers = False
-scheduler = WarmupAutoJenks(optimizer,milestones=gsm_lr_boundaries, warmup_factor=1/2, warmup_iters=warmup_epochs, prune_epochs=prune_epoch, reset=reset)
+rewind_epoch = None    # LR warm-restart disabled: gave no lift on CIFAR-10 (92.882% vs 92.880%)
+scheduler = WarmupAutoJenks(optimizer,milestones=gsm_lr_boundaries, warmup_factor=1/2, warmup_iters=warmup_epochs, prune_epochs=prune_epoch, reset=reset, rewind_epoch=rewind_epoch)
 accuracy = Accuracy(task='multiclass', num_classes=num_classes)
 top5accuracy = MulticlassAccuracy(num_classes=num_classes, top_k=5)
  ## Check the number of parameters in the model vs number of trainiable parameters

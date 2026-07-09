@@ -7,14 +7,16 @@ if "TORCH_CUDA_ARCH_LIST" not in os.environ:
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 from FP_Quantization_Experiments import (
-    brecq_quantize_exp_fp, brecq_quantize_exp_fp_scale,
     quantize_model_fp,
     QuantConv2dFP, QuantLinearFP, HadamardQuantLinearFP,
     apply_smoothquant, act_quant_mode,
     quantize_activations, quantize_activations_gf4,
     quantize_activations_gf4_adaptive, quantize_activations_gf4_residual,
-    calibrate_gf4_learned_levels, calibrate_model_gf4_hsmooth,
+    calibrate_gf4_learned_levels, calibrate_model_gf4_hsmooth, apply_gf4_hsmooth,
     apply_block_smoothquant_opt, preshifted_beta_only_mode,
+    enable_fast_kernels,
+    save_quantized_model, load_quantized_model,
+    LLAMA_SKIP_PATTERNS,
 )
 from torch.utils.data import DataLoader
 import torch
@@ -29,8 +31,14 @@ e_scale_bits = 4
 m_scale_bits = 3
 blocksize = 16
 batch_size = 8
-from huggingface_hub import login
-login(token="REMOVED")
+try:
+    import os as _os
+    from huggingface_hub import login
+    _hf_token = _os.environ.get("HF_TOKEN")
+    if _hf_token:
+        login(token=_hf_token)
+except Exception:
+    pass  # Use cached model if token is missing or invalid
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -198,11 +206,11 @@ def diagnose_activations(model, calib_loader, device, n_batches=2):
             if type(mod).__name__ == "HadamardQuantLinearFP":
                 if mod.had_block_size is not None and mod.D is not None:
                     from FP_Quantization_Experiments import fwht_blockwise
-                    x_had = fwht_blockwise(
-                        x_flat * mod.D.to(device=x_flat.device,
-                                          dtype=x_flat.dtype),
-                        mod.had_block_size
-                    )
+                    import torch.nn.functional as _F
+                    _D = mod.D.to(device=x_flat.device, dtype=x_flat.dtype)
+                    if x_flat.shape[-1] < _D.shape[-1]:   # pad M -> P (padded Hadamard)
+                        x_flat = _F.pad(x_flat, (0, _D.shape[-1] - x_flat.shape[-1]))
+                    x_had = fwht_blockwise(x_flat * _D, mod.had_block_size)
                     # If mean subtraction is active, apply it too
                     if mod.mu is not None:
                         x_had = x_had - mod.mu.to(device=x_flat.device,
@@ -278,11 +286,11 @@ def check_activation_quantization_error(model, calib_loader, device,
             if type(mod).__name__ == "HadamardQuantLinearFP":
                 if mod.had_block_size is not None and mod.D is not None:
                     from FP_Quantization_Experiments import fwht_blockwise
-                    x_flat = fwht_blockwise(
-                        x_flat * mod.D.to(device=x_flat.device,
-                                          dtype=x_flat.dtype),
-                        mod.had_block_size
-                    )
+                    import torch.nn.functional as _F
+                    _D = mod.D.to(device=x_flat.device, dtype=x_flat.dtype)
+                    if x_flat.shape[-1] < _D.shape[-1]:   # pad M -> P (padded Hadamard)
+                        x_flat = _F.pad(x_flat, (0, _D.shape[-1] - x_flat.shape[-1]))
+                    x_flat = fwht_blockwise(x_flat * _D, mod.had_block_size)
                 if mod.mu is not None:
                     x_flat = x_flat - mod.mu.to(device=x_flat.device,
                                                   dtype=x_flat.dtype)
@@ -358,6 +366,7 @@ OPT_MODELS = {
     "6.7b": "facebook/opt-6.7b",
     "13b": "facebook/opt-13b",
     "llama-1b":"meta-llama/Llama-3.2-1B",
+    "llama-3b":"meta-llama/Llama-3.2-3B",
     "llama-7b":"meta-llama/Llama-2-7b-hf",
         # GPT-2 family — very lightweight, good sanity-check baseline
     # Papers like GPTQ and LLM-FP4 use these as small-scale references
@@ -594,7 +603,11 @@ def get_llm_dataloader(dataset, tokenizer, batch_size=8):
         collate_fn=lambda batch: collate_fn(batch, tokenizer)
     )
 res_file = "quant_res.csv"
-model_name = OPT_MODELS["1.3b"]
+# Model selection: set the MODEL env var (e.g. MODEL=llama-1b) to override
+# without editing this file — convenient on Colab. Falls back to the default.
+_model_key = os.environ.get("MODEL", "2.7b")
+model_name = OPT_MODELS.get(_model_key, OPT_MODELS["2.7b"])
+print(f"Selected model: {_model_key} -> {model_name}")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 if tokenizer.pad_token is None:
@@ -615,7 +628,18 @@ print(f"  Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 print(f"  Reserved:  {torch.cuda.memory_reserved() / 1e9:.2f} GB")
 
 data ="wikitext-2-raw-v1"
-dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+# Newer datasets/huggingface_hub (e.g. on Colab) reject the legacy bare name
+# "wikitext" and require the canonical namespace/name. Fall back across the
+# known hosts so this runs on both old and new library versions.
+def _load_wikitext():
+    for repo in ("Salesforce/wikitext", "wikitext"):
+        try:
+            return load_dataset(repo, "wikitext-2-raw-v1", split="test")
+        except Exception as _e:
+            print(f"  load_dataset({repo!r}) failed: {type(_e).__name__}; trying next")
+    raise RuntimeError("Could not load wikitext-2-raw-v1 from any known repo")
+
+dataset = _load_wikitext()
 
 # Tokenize once; reuse across all PPL calls to avoid re-tokenizing per mode
 _ppl_ids      = _tokenize_corpus(tokenizer, dataset)
@@ -645,7 +669,16 @@ ppl_fp4_learned       = float('inf')
 ppl_fp4_learned_gptq  = float('inf')
 hadamard = False  # safe default in case try block OOMs before setting it
 try:
-    calib_loader = get_llm_dataloader(dataset, tokenizer, batch_size=batch_size)
+    # Large models OOM during the Hadamard-Hessian forward pass (attention is
+    # O(seq²) and hooks promote activations to fp32). Shrink the calibration
+    # batch for >2B-param models; calibration only needs enough tokens for
+    # stable block statistics, so we trade batch for more batches elsewhere.
+    _big_model = any(s in model_name.lower()
+                     for s in ("2.7b", "6.7b", "7b", "13b", "8b", "3b"))
+    _calib_bs  = 2 if _big_model else batch_size
+    if _big_model:
+        print(f"Large model detected — calibration batch_size={_calib_bs}")
+    calib_loader = get_llm_dataloader(dataset, tokenizer, batch_size=_calib_bs)
     hadamard = False
     import gc
     torch.cuda.empty_cache()
@@ -694,7 +727,22 @@ try:
                 print(f"{name}: {type(module).__name__}")
         with torch.no_grad():
             out_orig  = model(test_input, labels=test_input)
-    quant_model = quantize_model_fp(model,calib_loader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap= False, use_forward=False, Hadamard=True, joint=False, preshift=False, decompose=False, had_block_size="auto", use_gf4=True)
+    # Keep the MLP-output projection (the massive-activation / down_proj layer)
+    # in FP16. It carries per-token outliers a single FP4 term can't span, so
+    # quantizing it collapses single-term W4A4 (OPT-6.7b: fc2 quantized -> 1745
+    # ppl; Llama-7b: down_proj skipped -> survives 5.86). Per-architecture name:
+    #   Llama/Mistral SwiGLU MLP -> down_proj ;  OPT/GPT-2 MLP -> fc2.
+    # lm_head is already skipped by the quantizer's default head handling.
+    _mn = model_name.lower()
+    if "llama" in _mn or "mistral" in _mn:
+        _extra_skip = LLAMA_SKIP_PATTERNS          # ("down_proj",)
+    elif "opt" in _mn or "gpt" in _mn:
+        _extra_skip = ("fc2",)                     # OPT/GPT-2 MLP-output analog
+    else:
+        _extra_skip = tuple(LLAMA_SKIP_PATTERNS) + ("fc2",)  # default: skip both variants
+    if _extra_skip:
+        print(f"Keeping MLP-output layer in FP16 (outlier-safe): {_extra_skip}")
+    quant_model = quantize_model_fp(model,calib_loader, block_size=blocksize,e_bits=e_bits,m_bits=m_bits,e_bits_scale=e_scale_bits,m_bits_scale=m_scale_bits, device = device, use_HG=False, use_Hessian=False, use_adap= False, use_forward=False, Hadamard=True, joint=False, preshift=False, decompose=False, had_block_size="auto", use_gf4=True, extra_skip_patterns=_extra_skip)
     act_stats = diagnose_activations(quant_model, calib_loader, device)
     err_stats = check_activation_quantization_error(
         quant_model, calib_loader, device,
@@ -757,85 +805,165 @@ try:
 
         del model
         torch.cuda.empty_cache()
-    torch.cuda.empty_cache()
-    with act_quant_mode(quant_model, mode=None):
-        ppl_fp4_a16 = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                           _input_ids=_ppl_ids)
-        print("FP4 PPL (A16, sliding):", ppl_fp4_a16)
-        torch.cuda.empty_cache()
-        ppl_fp4_a16_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                   seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A16):", ppl_fp4_a16_gptq)
-        torch.cuda.empty_cache()
-    # with preshifted_beta_only_mode(quant_model):
-    #     ...
-    with act_quant_mode(quant_model, mode="nvfp4"):
-        ppl_fp4_nv = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                          _input_ids=_ppl_ids)
-        print("FP4 PPL (A4 nvfp4, sliding):", ppl_fp4_nv)
-        torch.cuda.empty_cache()
-        ppl_fp4_nv_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                  seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A4 nvfp4):", ppl_fp4_nv_gptq)
-        torch.cuda.empty_cache()
-    with act_quant_mode(quant_model, mode="gf4"):
-        ppl_fp4_gf4 = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                            _input_ids=_ppl_ids)
-        print("FP4 PPL (A4 gf4, sliding):", ppl_fp4_gf4)
-        torch.cuda.empty_cache()
-        ppl_fp4_gf4_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                    seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A4 gf4):", ppl_fp4_gf4_gptq)
-        torch.cuda.empty_cache()
 
-    # ── Novel activation quantization variants ────────────────────────
-    # Per-block adaptive clip selection (no calibration, online MSE minimization)
-    with act_quant_mode(quant_model, mode="gf4_adaptive"):
-        ppl_fp4_adaptive = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                                _input_ids=_ppl_ids)
-        print("FP4 PPL (A4 gf4_adaptive, sliding):", ppl_fp4_adaptive)
-        torch.cuda.empty_cache()
-        ppl_fp4_adaptive_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                        seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A4 gf4_adaptive):", ppl_fp4_adaptive_gptq)
-        torch.cuda.empty_cache()
+    # Switch Hadamard layers to Triton fast kernels (HadaCore FWHT + GF4 quant).
+    # This replaces the Python FWHT with the single-kernel L2-cached version
+    # (~5× faster) and the GF4 quantize with the Triton kernel (~2.7× faster).
+    # Falls back to Python automatically for custom GF4 levels (learned codebook).
+    enable_fast_kernels(quant_model, enable=True)
+
+    # ── Free dead fp32 originals so eval fits a 16GB GPU (e.g. Kaggle T4) ────
+    # After calibration, quantized layers run entirely from weight_q (the
+    # step-5 GEMM); linear.weight is read only by the fp16-skip fallback
+    # (weight_q is None).  Dropping the original weight on every quantized
+    # layer is a forward no-op and reclaims ~5GB for OPT-2.7b.  Skipped fp16
+    # layers (weight_q is None) keep their weight for the fallback path.
+    _freed_n, _freed_bytes = 0, 0
+    for _m in quant_model.modules():
+        if getattr(_m, "weight_q", None) is None:
+            continue
+        _lin = getattr(getattr(_m, "inner", _m), "linear", None)
+        if _lin is not None and getattr(_lin, "weight", None) is not None:
+            _freed_bytes += _lin.weight.numel() * _lin.weight.element_size()
+            _lin.weight = None     # registered Parameter → None frees the tensor
+            _freed_n += 1
+    torch.cuda.empty_cache()
+    gc.collect()
+    print(f"Freed {_freed_n} original weight tensors "
+          f"({_freed_bytes / 1e9:.2f} GB) — quantized layers now run from "
+          f"fp16 weight_q only")
+
+    # ── Save a reloadable checkpoint (opt-in via SAVE_MODEL=1) ──────────────
+    # Full-object save (see save_quantized_model): a plain state_dict() drops
+    # the plain-attribute state (D, had_block_size, act_clip_ratio, gf4_levels)
+    # so the reload would not run.  Path uses CKPT_DIR or the cwd — NEVER
+    # __file__, which is undefined in a Colab/Jupyter cell (that NameError was
+    # the old breakage).  Saved AFTER the weight-free so it's the compact fp16
+    # model: quantized layers reload runnable from weight_q, skipped layers from
+    # their kept weight.  Reload: load_quantized_model(path, device).
+    if os.environ.get("SAVE_MODEL", "0") == "1":
+        try:
+            _ckpt_dir  = os.environ.get("CKPT_DIR", os.getcwd())
+            _ckpt_path = os.path.join(_ckpt_dir, f"{_model_key}_fpquant.pt")
+            print(f"\nSaving quantized model → {_ckpt_path}")
+            save_quantized_model(quant_model, _ckpt_path)
+            print(f"  saved ({os.path.getsize(_ckpt_path) / 1e9:.2f} GB) — reload "
+                  f"with load_quantized_model('{_ckpt_path}', device)")
+        except Exception as _e:
+            print(f"  WARNING: checkpoint save failed ({_e}) — continuing to eval.")
+
+    torch.cuda.empty_cache()
+    # ── Activation-quant PPL sweep ─────────────────────────────────────────
+    # Every eval (sliding AND GPTQ) is guarded independently so an OOM in one
+    # stage/mode can never abort the rest of the sweep — critical so the
+    # residual-GF4 headline still runs even if an earlier GPTQ pass OOMs.
+    # GPTQ uses batch_size=1 on the quantized model: the padded weight_q + mu +
+    # bias_correction buffers make it heavier than the fp16 baseline, and bs=4
+    # OOMs the 2048-token chunks even on an 80GB H100.
+
+    # Budget control for slow GPUs (e.g. Colab/Kaggle T4): by default run only
+    # the headline modes (A16, gf4, adaptive, residual) and the sliding protocol.
+    # Export FULL_SWEEP=1 on a fast/large GPU to also run nvfp4, learned levels,
+    # H-smooth, and the (slow, bs=1) GPTQ protocol.
+    _FULL_SWEEP = os.environ.get("FULL_SWEEP", "0") == "1"
+    _RUN_GPTQ   = _FULL_SWEEP
+
+    def _safe_eval(mode_str, label=None, gptq_batch_size=1):
+        """Run sliding + GPTQ PPL for a given act-quant mode; returns (sliding, gptq).
+        Each stage is guarded independently so an OOM on GPTQ doesn't lose the
+        already-computed sliding result, and an OOM here never aborts the sweep."""
+        label = label or str(mode_str)
+        ppl_s, ppl_g = float('inf'), float('inf')
+        # Sliding window eval
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+            with act_quant_mode(quant_model, mode=mode_str):
+                ppl_s = compute_standard_ppl(quant_model, tokenizer, dataset,
+                                             _input_ids=_ppl_ids)
+            print(f"FP4 PPL ({label}, sliding):", ppl_s)
+            torch.cuda.empty_cache()
+        except torch.cuda.OutOfMemoryError:
+            print(f"  OOM during {label} sliding eval — skipping.")
+            torch.cuda.empty_cache()
+            gc.collect()
+            return ppl_s, ppl_g
+        # GPTQ-style eval (skipped unless FULL_SWEEP — slow at bs=1 on a T4)
+        if not _RUN_GPTQ:
+            return ppl_s, ppl_g
+        try:
+            gc.collect()
+            with act_quant_mode(quant_model, mode=mode_str):
+                ppl_g = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
+                                               seq_len=2048, batch_size=gptq_batch_size,
+                                               _input_ids=_ppl_ids_gptq)
+            print(f"FP4 GPTQ PPL ({label}):", ppl_g)
+            torch.cuda.empty_cache()
+        except torch.cuda.OutOfMemoryError:
+            print(f"  OOM during {label} GPTQ eval — skipping.")
+            torch.cuda.empty_cache()
+            gc.collect()
+        return ppl_s, ppl_g
+
+    torch.cuda.empty_cache()
+    ppl_fp4_a16, ppl_fp4_a16_gptq = _safe_eval(None,    label="A16")
+    if _FULL_SWEEP:
+        ppl_fp4_nv,  ppl_fp4_nv_gptq  = _safe_eval("nvfp4", label="A4 nvfp4")
+    ppl_fp4_gf4, ppl_fp4_gf4_gptq = _safe_eval("gf4",   label="A4 gf4")
+
+    # Per-block adaptive clip selection (online MSE minimization, no calibration)
+    ppl_fp4_adaptive, ppl_fp4_adaptive_gptq = _safe_eval("gf4_adaptive")
 
     # Two-stage residual GF4 (2× effective resolution)
-    with act_quant_mode(quant_model, mode="gf4_residual"):
-        ppl_fp4_residual = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                                _input_ids=_ppl_ids)
-        print("FP4 PPL (A4 gf4_residual, sliding):", ppl_fp4_residual)
-        torch.cuda.empty_cache()
-        ppl_fp4_residual_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                        seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A4 gf4_residual):", ppl_fp4_residual_gptq)
-        torch.cuda.empty_cache()
+    ppl_fp4_residual, ppl_fp4_residual_gptq = _safe_eval("gf4_residual")
 
-    # Learned GF4 codebook (gradient-optimized level positions)
-    calibrate_gf4_learned_levels(quant_model, calib_loader, device, blocksize,
-                                  num_batches=4, n_steps=400)
-    with act_quant_mode(quant_model, mode="gf4"):
-        ppl_fp4_learned = compute_standard_ppl(quant_model, tokenizer, dataset,
-                                               _input_ids=_ppl_ids)
-        print("FP4 PPL (A4 gf4_learned, sliding):", ppl_fp4_learned)
-        torch.cuda.empty_cache()
-        ppl_fp4_learned_gptq = compute_ppl_gptq_style(quant_model, tokenizer, dataset,
-                                                       seq_len=2048, _input_ids=_ppl_ids_gptq)
-        print("FP4 GPTQ PPL (A4 gf4_learned):", ppl_fp4_learned_gptq)
-        torch.cuda.empty_cache()
-    # Reset learned levels so subsequent GF4 evals use original levels
-    for _, m in quant_model.named_modules():
-        if type(m).__name__ == "HadamardQuantLinearFP":
-            m.gf4_levels = None
+    # Learned GF4 codebook + H-SmoothQuant — FULL_SWEEP only.  The learned-levels
+    # 400-step calibration and the h-smooth recalibration are both too slow for
+    # a T4 budget and are not the headline result.
+    if _FULL_SWEEP:
+        # Learned GF4 codebook (gradient-optimized level positions)
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+            calibrate_gf4_learned_levels(quant_model, calib_loader, device, blocksize,
+                                          num_batches=4, n_steps=400)
+            ppl_fp4_learned, ppl_fp4_learned_gptq = _safe_eval("gf4")
+            # Reset learned levels for any subsequent evals
+            for _, m in quant_model.named_modules():
+                if type(m).__name__ == "HadamardQuantLinearFP":
+                    m.gf4_levels = None
+        except torch.cuda.OutOfMemoryError:
+            print("  OOM during learned-levels calibration — skipping.")
+            torch.cuda.empty_cache()
+            gc.collect()
 
-    # H-domain SmoothQuant: evaluated on the already-calibrated model.
-    # Note: hsmooth requires re-calibrating from scratch for a clean run;
-    # this applies the smooth-scale adjustment post-hoc as a prototype.
-    calibrate_model_gf4_hsmooth.__doc__  # just ensure it's imported
-    # The h_smooth variant needs a fresh quant_model; run via gf4_variant="hsmooth"
-    # in quantize_model_fp on the next full run. Skipping here to avoid
-    # re-running the heavy weight calibration mid-script.
-    print("(H-SmoothQuant requires full recalibration — run with gf4_variant='hsmooth')")
+        # H-SmoothQuant: applied post-hoc to the already-calibrated model.
+        # (Full production use: quantize_model_fp(..., gf4_variant="hsmooth"))
+        try:
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("\nApplying H-domain smooth scaling post-hoc...")
+            # Save original W_had_q so we can measure the effect cleanly
+            _saved_wq = {}
+            for name, m in quant_model.named_modules():
+                if type(m).__name__ == "HadamardQuantLinearFP" and m.weight_q is not None:
+                    _saved_wq[name] = m.weight_q.data.clone()
+            apply_gf4_hsmooth(quant_model, calib_loader, blocksize, device,
+                              num_batches=4)
+            ppl_fp4_hsmooth, ppl_fp4_hsmooth_gptq = _safe_eval("gf4")
+            # Restore original weights
+            for name, m in quant_model.named_modules():
+                if name in _saved_wq:
+                    if 'weight_q' in m.inner._buffers:
+                        m.inner._buffers['weight_q'] = _saved_wq[name]
+                    else:
+                        m.inner.weight_q = _saved_wq[name]
+                    m.h_smooth_scale = None
+            del _saved_wq
+        except torch.cuda.OutOfMemoryError:
+            print("  OOM during H-SmoothQuant eval — skipping.")
+            torch.cuda.empty_cache()
+            gc.collect()
 
     # with act_quant_mode(quant_model, mode= "preshifted"):
     #     ppl_fp4  = compute_standard_ppl(quant_model, tokenizer, dataset)

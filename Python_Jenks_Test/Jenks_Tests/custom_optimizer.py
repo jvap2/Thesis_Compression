@@ -8,6 +8,13 @@ import time
 import gc
 from torchvision.transforms.v2 import CutMix, MixUp, RandomChoice
 
+# MixUp/CutMix augmentation toggle for train_one_step_prune_HPO.
+# MIXUP=False -> original behavior (no change). When True, each training batch is
+# randomly CutMix'd or MixUp'd (soft labels into the loss); MIXUP_OFF_EPOCH lets us
+# disable it for the final epochs so the model fine-tunes on clean labels.
+MIXUP = False
+MIXUP_OFF_EPOCH = 10**9
+
 
 def apply_gradient_centralization(model):
     with torch.no_grad():
@@ -2282,11 +2289,23 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
     num_layers = len(list(net.parameters()))
     if elem_bias:
         optimizer.epoch = epoch
+    # Set up MixUp/CutMix if enabled. num_classes is read from the model's final
+    # Linear layer so it works for CIFAR-10/100/TinyImageNet without hardcoding.
+    use_mixup = MIXUP and epoch <= MIXUP_OFF_EPOCH
+    if use_mixup:
+        n_classes = None
+        for _m in net.modules():
+            if isinstance(_m, torch.nn.Linear):
+                n_classes = _m.out_features
+        cutmix_or_mixup = RandomChoice([CutMix(num_classes=n_classes), MixUp(num_classes=n_classes)])
     for i, (data, label) in enumerate(dataloader):
         torch.cuda.empty_cache()
         count+=1
         start = time.time()
         data,label = data.to(device), label.to(device)
+        label_hard = label  # keep integer labels for accuracy; mixup makes label soft
+        if use_mixup:
+            data, label = cutmix_or_mixup(data, label)
         pred = net(data)
         loss_iter = criterion(pred, label)
         if L2:
@@ -2300,7 +2319,7 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
                 for name, param in net.named_parameters():
                     param.data.mul_(optimizer.state[param]['mask'])
         loss += loss_iter.item()
-        acc_dummy, acc5_dummy = torch_accuracy(pred, label, (1,5))
+        acc_dummy, acc5_dummy = torch_accuracy(pred, label_hard, (1,5))
         acc += acc_dummy
         acc5 += acc5_dummy
         num_layers = len(list(net.parameters()))

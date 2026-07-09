@@ -1,0 +1,68 @@
+architecture:
+    version: '0.4'
+    local:
+      - name: GF4_Engine_ingress.chip.PE[0..255].weight_reg
+        class: regfile
+        attributes:
+            depth: 64
+            width: 4
+            word-bits: 4
+            block-size: 1
+            meshX: 16
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0
+      - name: GF4_Engine_ingress.chip.PE[0..255].input_reg
+        class: regfile
+        attributes:
+            depth: 64
+            width: 4
+            word-bits: 4
+            block-size: 1
+            meshX: 16
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0
+      - name: GF4_Engine_ingress.chip.PE[0..255].psum_reg
+        class: regfile
+        attributes:
+            depth: 16
+            width: 24
+            word-bits: 24
+            block-size: 1
+            meshX: 16
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0
+      - name: GF4_Engine_ingress.chip.PE[0..255].mac
+        class: fp4_mac
+        attributes:
+            datawidth: 4
+            meshX: 16
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0
+      - name: GF4_Engine_ingress.chip.global_buffer
+        class: lut_sram
+        attributes:
+            depth: 16384
+            width: 256
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0
+      - name: GF4_Engine_ingress.DRAM
+        class: DRAM
+        attributes:
+            type: "LPDDR4"
+            width: 64
+            block-size: 16
+            word-bits: 4
+            technology: "45nm"
+            global_cycle_seconds: 1e-09
+        area_scale: 1.0
+        energy_scale: 1.0

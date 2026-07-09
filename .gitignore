@@ -38,3 +38,22 @@ Python_Jenks_Test/Jenks_Tests/vgg19_cifar100_Output/
 Python_Jenks_Test/Jenks_Tests/ResNet_32_cifar100_Output/
 Python_Jenks_Test/Jenks_Tests/ResNet_32_cifar10_Output/
 Python_Jenks_Test/Jenks_Tests/ResNet_32_tiny_imagenet_Output/
+Golang_Jenks_Test/
+
+# ── Build / run artifacts (apply repo-wide) ─────────────────────────
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Logs and run stdout captures (fp_quant_run*.log, offload_*.out, diag_*.out, …)
+*.log
+*.out
+
+# Backups, archives, and model/checkpoint blobs
+*.bak
+*.tar.gz
+*.tgz
+*.pt
+*.pth
+*.clean

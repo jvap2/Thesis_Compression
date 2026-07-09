@@ -1,0 +1,15 @@
+ART:
+    version: '0.4'
+    tables:
+      - name: NVFP4_Engine.chip.PE[0..255].weight_reg
+        area: 845.98
+      - name: NVFP4_Engine.chip.PE[0..255].input_reg
+        area: 845.98
+      - name: NVFP4_Engine.chip.PE[0..255].psum_reg
+        area: 145.98
+      - name: NVFP4_Engine.chip.global_buffer
+        area: 1923440.0
+      - name: NVFP4_Engine.DRAM
+        area: 0.0
+      - name: NVFP4_Engine.chip.PE[0..255].mac
+        area: 1.0

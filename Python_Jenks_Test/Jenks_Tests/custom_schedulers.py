@@ -271,7 +271,8 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
         last_epoch=-1,
         adjustable = False,
         wd_adj = True,
-        cosine = False
+        cosine = False,
+        rewind_epoch = None
     ):
         if not list(milestones) == sorted(milestones):
             raise ValueError(
@@ -282,6 +283,7 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
                 "Only 'constant' or 'linear' warmup_method accepted, got {}".format(warmup_method)
             )
 
+        self.rewind_epoch = rewind_epoch
         self.milestones = milestones
         self.gamma = gamma
         self.optimizer = optimizer
@@ -356,6 +358,25 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
                     # update param group weight decay deterministically (no cumulative multiplication)
                     group["weight_decay"] = float(wd.clamp(min=0.0).item())
                 # update a,b with tensor lr
+                self.a[i] += lr_t**2
+                self.b[i] += lr_t
+                scaled_lrs.append(lr_t.item())
+            return scaled_lrs
+        elif self.rewind_epoch is not None and self.last_epoch == self.rewind_epoch:
+            # LR warm-restart on the post-freeze recovery tail: mask is frozen,
+            # re-anneal the (already accumulated) LR/WD schedule from init so the
+            # fixed sparse weights can re-converge into a better basin.
+            self.reset_accumulators()
+            scaled_lrs = []
+            for i,group in enumerate(self.optimizer.param_groups):
+                lr_t = self.init_lr[i]
+                wd = self.init_wd[i]
+                if self.wd_adj:
+                    eps = 1e-12
+                    wd = torch.sqrt(self.P[i]**2 + self.M[i] / (lr_t + eps)) - self.P[i]
+                    self.M[i] += lr_t * (wd ** 2)
+                    self.P[i] += wd
+                    group["weight_decay"] = float(wd.clamp(min=0.0).item())
                 self.a[i] += lr_t**2
                 self.b[i] += lr_t
                 scaled_lrs.append(lr_t.item())

@@ -1,0 +1,64 @@
+mapping:
+  - target: psum_reg
+    type: datatype
+    keep:
+      []
+    bypass:
+      - Weights
+      - Inputs
+      - Outputs
+  - target: input_reg
+    type: datatype
+    keep:
+      - Weights
+    bypass:
+      - Inputs
+      - Outputs
+  - target: weight_reg
+    type: datatype
+    keep:
+      []
+    bypass:
+      - Weights
+      - Inputs
+      - Outputs
+  - target: global_buffer
+    type: datatype
+    keep:
+      - Inputs
+      - Outputs
+    bypass:
+      - Weights
+  - target: DRAM
+    type: datatype
+    keep:
+      - Weights
+      - Inputs
+      - Outputs
+    bypass:
+      []
+  - target: psum_reg
+    type: temporal
+    factors: R1 S1 P1 Q1 C2 K1 N16
+    permutation: CNRSPQK
+  - target: input_reg
+    type: temporal
+    factors: R1 S1 P1 Q1 C2 K16 N8
+    permutation: KCNRSPQ
+  - target: weight_reg
+    type: temporal
+    factors: R1 S1 P1 Q1 C1 K1 N2
+    permutation: NRSPQCK
+  - target: global_buffer
+    type: spatial
+    factors: R1 S1 P1 Q1 C8 K2 N1
+    permutation: KCRSPQN
+    split: 0
+  - target: global_buffer
+    type: temporal
+    factors: R1 S1 P1 Q1 C8 K64 N1
+    permutation: CKRSPQN
+  - target: DRAM
+    type: temporal
+    factors: R1 S1 P1 Q1 C8 K1 N8
+    permutation: CNRSPQK

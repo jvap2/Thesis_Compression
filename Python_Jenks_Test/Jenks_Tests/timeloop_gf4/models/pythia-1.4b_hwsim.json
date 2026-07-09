@@ -1,0 +1,42 @@
+{
+  "model": "EleutherAI/pythia-1.4b",
+  "seqlen": 2048,
+  "block_size": 16,
+  "skipped_fp16": [
+    "dense_4h_to_h"
+  ],
+  "config": {
+    "hidden_size": 2048,
+    "intermediate_size": 8192,
+    "num_hidden_layers": 24,
+    "vocab_size": 50304
+  },
+  "ppl": {
+    "A16 (W4A16)": 13.343316529598914,
+    "E2M1/NVFP4": 14.600076752401671,
+    "GF4 adaptive": 14.535854240664591,
+    "residual-GF4": 13.370895365787012
+  },
+  "shapes": [
+    {
+      "K": 2048,
+      "N": 2048,
+      "count": 24
+    },
+    {
+      "K": 2048,
+      "N": 6144,
+      "count": 24
+    },
+    {
+      "K": 2048,
+      "N": 8192,
+      "count": 24
+    },
+    {
+      "K": 2048,
+      "N": 50304,
+      "count": 1
+    }
+  ]
+}
