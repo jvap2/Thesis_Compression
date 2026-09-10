@@ -85,7 +85,7 @@ module tb_gf4_decode;
         .mag_out  (mag_out_prog)
     );
  
-    gf4_decode_fixed dut_fixed (
+    e2m1_decode_fixed dut_fixed (
         .idx      (idx),
         .sign_in  (sign_in),
         .sign_out (sign_out_fixed),

@@ -1,0 +1,263 @@
+% ============================================================================
+%  Hessian-aware weight reconstruction is conditional.
+%
+%  Standalone-compilable (pdflatex hessian_conditional.tex), or strip the
+%  preamble and \input the section body into the paper.
+%
+%  CLAIM (conditional / honest): the Hessian-damped, error-feedback weight
+%  calibration (Lloyd/GPTQ-style, alpha* = (b^T H w)/(b^T H b), damped) is
+%  NECESSARY only when the layer's activation Hessian H = X^T X / T retains an
+%  extreme, quantization-axis-aligned spike.  The randomized Hadamard rotation
+%  that removes activation outliers ALSO de-aligns the heavy eigendirections of
+%  H from the quantization axes, shrinking the RTN-vs-optimal gap by ~sqrt(d);
+%  for generic layers this makes plain round-to-nearest (RTN) near-optimal
+%  ("Hessian barely helps single-GF4"), while pathological layers (opt-13b
+%  W4A16) still collapse under RTN (304) and require the reconstruction (10.5).
+%
+%  Grounding (CUDA_FP4_Test/reference.py, verified):
+%    H_block = X_block^T X_block / T          (bit_split.py)
+%    alpha*  = (b_eff . (H w)) / (b_eff . (H b))     Lloyd step, per block
+%    damping lam_add = max(lam_max/kappa - lam_min, 0),  kappa = 100
+%    opt-13b W4A16 collapse 304 -> 10.5 with the damped reconstruction.
+% ============================================================================
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\norm}[1]{\lVert #1 \rVert}
+\newcommand{\Hm}{\bm H}
+\newcommand{\wh}{\hat{\bm w}}
+
+\begin{document}
+
+\section{Hessian-aware reconstruction is conditional}
+\label{sec:hessian}
+
+\subsection{Setup: the layer objective and what RTN ignores}
+
+For a linear layer $\bm y=\bm x\bm W^{\!\top}$, the calibration-optimal
+quantized weight minimizes the expected \emph{output} error, not the weight
+error:
+\begin{equation}
+\label{eq:obj}
+\min_{\hat{\bm W}\in\mathcal Q}\;
+\E_{\bm x}\big\|(\bm W-\hat{\bm W})\bm x\big\|^2
+= \min_{\hat{\bm W}\in\mathcal Q}\;
+\tr\!\big[(\bm W-\hat{\bm W})\,\Hm\,(\bm W-\hat{\bm W})^{\!\top}\big],
+\qquad
+\Hm=\E[\bm x\bm x^{\!\top}]\approx\tfrac1T \bm X^{\!\top}\bm X,
+\end{equation}
+where $\Hm\in\R^{d\times d}$ is the (per-layer) activation second moment --- the
+Gauss--Newton Hessian of the reconstruction. The objective decouples over rows;
+for a single row $\bm w\in\R^d$ with quantization residual
+$\bm\delta=\bm w-\wh$,
+\begin{equation}
+\label{eq:E}
+E(\wh)=\bm\delta^{\!\top}\Hm\,\bm\delta
+      =\underbrace{\textstyle\sum_i \Hm_{ii}\delta_i^2}_{\text{diagonal / unavoidable}}
+      +\underbrace{\textstyle\sum_{i\neq j}\Hm_{ij}\delta_i\delta_j}_{\text{cross terms}} .
+\end{equation}
+\textbf{Round-to-nearest (RTN)} quantizes each coordinate independently, i.e.\
+minimizes $\norm{\bm\delta}^2$ ($\Hm{=}\bm I$); it ignores the second term.
+\textbf{Hessian-aware reconstruction} (the damped Lloyd/GPTQ step
+$\alpha^\star=(\bm b^{\!\top}\Hm\bm w)/(\bm b^{\!\top}\Hm\bm b)$ with error
+feedback) instead \emph{steers} $\bm\delta$ into the low-curvature subspace to
+cancel the cross terms. The question is when that steering is worth its cost.
+
+\subsection{Lemma 1: the RTN gap is set by curvature aligned with the axes}
+
+\begin{lemma}[RTN suboptimality]
+\label{lem:gap}
+Let $\bm\delta$ be the RTN residual (per coordinate, $\E\delta_i=0$,
+$\E\delta_i^2=\sigma^2=\Delta^2/12$, independent across $i$). Then
+\begin{equation}
+\label{eq:gapmean}
+\E\,E_{\mathrm{RTN}} = \sigma^2\tr(\Hm)
+= \sigma^2\!\sum_i\Hm_{ii},
+\qquad
+\E\,E_{\mathrm{RTN}}-E_{\mathrm{opt}}
+\;\le\; \sigma^2\big(\tr\Hm - d\,\lambda_{\min}(\Hm)\big),
+\end{equation}
+and the achievable reduction $E_{\mathrm{RTN}}-E_{\mathrm{opt}}$ is nonzero only
+to the extent the residual can be rotated toward small-eigenvalue directions of
+$\Hm$; it scales with the \emph{anisotropy} $\lambda_{\max}/\bar\lambda$
+($\bar\lambda=\tr\Hm/d$) \emph{as seen in the quantization (coordinate) basis}.
+\end{lemma}
+
+\begin{proof}
+Independence and zero mean kill the cross terms in expectation, giving
+$\E E_{\mathrm{RTN}}=\sigma^2\sum_i\Hm_{ii}=\sigma^2\tr\Hm$. Any admissible
+quantizer pays at least $\sigma^2 d\,\lambda_{\min}$ on the residual energy it
+cannot remove, so the optimal value is bounded below by that; subtracting gives
+\eqref{eq:gapmean}. The reduction is realized only by choosing $\bm\delta$
+correlated with the eigenvectors of $\Hm$ (error feedback), whose leverage is
+the eigenvalue spread.
+\end{proof}
+
+The gap is large exactly when a \emph{few} coordinates carry large curvature
+$\Hm_{ii}$ (a spike aligned with an axis): RTN spends $\sigma^2\Hm_{ii}$ there,
+while reconstruction keeps those coordinates precise and dumps the error into
+flat directions. This is the regime where GPTQ/OBQ-style calibration earns its
+keep.
+
+\subsection{Lemma 2: rotation de-aligns the spike from the quantization axes}
+
+Let $\bm R=\tfrac1{\sqrt d}\bm H\bm D$ be the randomized Hadamard transform used
+for the activations; the layer is quantized in the rotated basis, with Hessian
+$\tilde{\Hm}=\bm R\,\Hm\,\bm R^{\!\top}$. A similarity transform preserves the
+spectrum, so rotation does \emph{not} change $\{\lambda_i\}$ --- but it changes
+how that spectrum sits relative to the (axis-aligned) quantization lattice.
+
+\begin{lemma}[Incoherence of the rotated Hessian]
+\label{lem:rotH}
+Fix $\Hm\succeq 0$. For $\bm R$ as above, with probability $\ge 1-\delta$,
+\begin{equation}
+\label{eq:diag}
+\max_i\big|\tilde{\Hm}_{ii}-\bar\lambda\big|
+   \;\le\; \frac{\lambda_{\max}}{\sqrt d}\,\sqrt{2\log\tfrac{2d}{\delta}},
+\qquad
+\max_{i\neq j}\big|\tilde{\Hm}_{ij}\big|
+   \;\lesssim\; \frac{\lambda_{\max}}{\sqrt d}\,\sqrt{2\log\tfrac{2d}{\delta}},
+\end{equation}
+i.e.\ every diagonal entry concentrates at $\bar\lambda=\tr\Hm/d$ and every
+off-diagonal is $O(\lambda_{\max}/\sqrt d)$. Consequently any single
+eigendirection $\bm v$ of $\Hm$ has coordinates
+$|(\bm R\bm v)_i|=O(1/\sqrt d)$ in the rotated basis (delocalization).
+\end{lemma}
+
+\begin{proof}
+$\tilde{\Hm}_{ij}=\bm r_i^{\!\top}\Hm\,\bm r_j$ with $\bm r_i=\bm R^{\!\top}\bm e_i$
+a randomized-sign unit-norm row; write $\Hm=\sum_k\lambda_k\bm u_k\bm u_k^{\!\top}$.
+Each $\langle\bm r_i,\bm u_k\rangle$ is a Rademacher sum with sub-Gaussian proxy
+$1/d$, so $\bm r_i^{\!\top}\Hm\bm r_j$ concentrates at
+$\bar\lambda\,\mathbf 1\{i{=}j\}$ with fluctuation
+$O(\lambda_{\max}/\sqrt d)$ by Hanson--Wright / a union bound over the $d^2$
+entries; this is \eqref{eq:diag}. Delocalization is the same sub-Gaussian bound
+applied to $(\bm R\bm v)_i=\bm r_i^{\!\top}\bm v$.
+\end{proof}
+
+The point is \emph{not} that rotation whitens $\Hm$ (it cannot; the eigenvalues
+are fixed) but that it makes $\tilde{\Hm}$ \emph{diagonally dominant with a
+uniform diagonal}: the heavy curvature no longer aligns with any coordinate. By
+Lemma~\ref{lem:gap} the exploitable gap is governed by axis-aligned curvature,
+which \eqref{eq:diag} caps at $\bar\lambda+O(\lambda_{\max}/\sqrt d)$.
+
+\subsection{Theorem: when reconstruction is (un)necessary}
+
+\begin{theorem}[Conditional necessity of Hessian reconstruction]
+\label{thm:cond}
+In the rotated basis, the RTN suboptimality obeys
+\begin{equation}
+\label{eq:cond}
+0\;\le\;\E\,E_{\mathrm{RTN}}-E_{\mathrm{opt}}
+   \;\le\; \sigma^2\,\frac{\lambda_{\max}}{\sqrt d}\,
+           \sqrt{2\log\tfrac{2d}{\delta}}\;\cdot\;\rho_{\mathrm{off}},
+\end{equation}
+where $\rho_{\mathrm{off}}\le d$ counts the residual off-diagonal coupling.
+Hence:
+\begin{itemize}
+\item[(i)] If the layer is well conditioned or only mildly spiked after
+rotation, $\lambda_{\max}=O(\bar\lambda\sqrt d)$, the bound is
+$O(\sigma^2\bar\lambda)$ --- the same order as the unavoidable diagonal term
+--- so RTN is near-optimal and \textbf{Hessian reconstruction is unnecessary}.
+\item[(ii)] If a residual extreme spike survives rotation,
+$\lambda_{\max}\gtrsim\bar\lambda\,d$ (an $\Omega(\sqrt d)$ outlier eigenvalue
+that Hadamard mixing cannot equalize), the bound is
+$\Omega(\sigma^2\bar\lambda\sqrt d)$ and RTN can diverge; \textbf{the damped
+reconstruction is necessary} and recovers the $O(\sigma^2\bar\lambda)$ optimum.
+\end{itemize}
+\end{theorem}
+
+\begin{proof}
+Combine Lemma~\ref{lem:gap} (gap $\le\sigma^2(\tr\tilde\Hm-d\lambda_{\min})$ and
+proportional to axis-aligned curvature) with Lemma~\ref{lem:rotH} (axis-aligned
+curvature $\le\bar\lambda+O(\lambda_{\max}/\sqrt d)$), yielding \eqref{eq:cond}.
+Cases (i)/(ii) substitute the two scalings of $\lambda_{\max}$; in case (ii) the
+$\alpha^\star$-Lloyd step attains $E_{\mathrm{opt}}$ up to the damping bias of
+Remark~\ref{rem:damp}.
+\end{proof}
+
+\begin{corollary}[The rotation is doing the calibration's job --- until it can't]
+The same randomized Hadamard rotation that removes activation outliers
+(\S\ref{sec:retention}, Lemma on incoherence) simultaneously de-aligns the
+weight Hessian's heavy directions, so on \emph{most} layers RTN already sits at
+the Hessian optimum. Reconstruction is therefore a targeted fix for the few
+layers whose curvature spike is too large for $\sqrt d$ mixing to absorb, not a
+uniform requirement.
+\end{corollary}
+
+\subsection{The damping term, and why it is the right conditional knob}
+
+\begin{remark}[Damping]
+\label{rem:damp}
+The reconstruction solves $\alpha^\star=(\bm b^{\!\top}\Hm\bm w)/
+(\bm b^{\!\top}\Hm\bm b)$ on a Hessian regularized by
+$\Hm\leftarrow\Hm+\lambda_{\mathrm{add}}\bm I$,
+$\lambda_{\mathrm{add}}=\max(\lambda_{\max}/\kappa-\lambda_{\min},0)$,
+$\kappa=100$. This caps the condition number of the working Hessian at $\kappa$:
+it is active precisely in case (ii) (a genuine spike, $\lambda_{\min}\ll
+\lambda_{\max}/\kappa$) and inert in case (i) ($\lambda_{\min}\ge\lambda_{\max}/
+\kappa\Rightarrow\lambda_{\mathrm{add}}=0$, reconstruction $\to$ RTN). Damping is
+thus the mechanism that makes the procedure \emph{degrade gracefully to RTN}
+exactly where Theorem~\ref{thm:cond}(i) says RTN suffices.
+\end{remark}
+
+\subsection{Empirical instantiation}
+
+\begin{center}\small
+\begin{tabular}{@{}lccl@{}}
+\toprule
+Layer / model regime & RTN (H-agnostic) & Damped reconstruction & Verdict \\
+\midrule
+opt-13b, W4A16, padded MLP (spiked $\Hm$)
+   & $\approx\!304$ ppl (collapse) & $\approx\!10.5$ ppl & reconstruction \emph{necessary} \\
+generic layers, single-GF4 W4A4
+   & near-optimal & $\approx$ same (barely helps) & reconstruction \emph{optional} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two rows are the two branches of Theorem~\ref{thm:cond}. The opt-13b
+padded-MLP layer carries an $\Omega(\sqrt d)$ curvature spike that survives
+rotation (case ii): RTN collapses to $304$, the damped $\alpha^\star$-Lloyd step
+restores $10.5$. On the remaining layers the rotated Hessian is diagonally
+dominant (case i): RTN is already at the optimum, so adding the reconstruction
+moves perplexity within noise --- consistent with the observation that a single
+Hessian pass ``barely helps'' the generic GF4 build.
+
+\subsection{What is and is not claimed}
+
+\begin{remark}[Scope]
+The claim is \emph{conditional}: Hessian-aware reconstruction is not a blanket
+requirement for FP4 weight quantization. Given the activation rotation, plain
+RTN is provably near-optimal for any layer whose post-rotation curvature spike
+is $O(\bar\lambda\sqrt d)$ (the common case); reconstruction is required only for
+residual extreme spikes ($\lambda_{\max}=\Omega(\bar\lambda d)$), which in our
+suite means specifically the pathological padded/outlier layers (opt-13b). The
+damping $\kappa=100$ makes the method collapse to RTN automatically where it is
+not needed.
+\end{remark}
+
+\begin{remark}[Honest caveats]
+(a) Lemma~\ref{lem:rotH} is high-probability over the rotation, not worst-case;
+an adversarial $\Hm$ co-designed with $\bm R$ is excluded. (b) The residual model
+$\E\delta_i\delta_j=\sigma^2\mathbf 1\{i{=}j\}$ (Lemma~\ref{lem:gap}) is the
+standard high-resolution surrogate; real integer residuals are weakly correlated
+and only rescale constants. (c) $E_{\mathrm{opt}}$ is the coordinate-descent
+(GPTQ) optimum, not the NP-hard lattice optimum; the $\alpha^\star$ step attains
+it up to the damping bias. (d) The empirical row values are single-layer /
+whole-model perplexities under the paper's protocol and inherit its eval noise.
+\end{remark}
+
+\end{document}

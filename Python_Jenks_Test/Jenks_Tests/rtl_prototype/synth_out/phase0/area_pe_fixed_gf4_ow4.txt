@@ -1,0 +1,101 @@
+
+15. Printing statistics.
+
+=== gf4_decode_fixed ===
+
+   Number of wires:                 12
+   Number of wire bits:             21
+   Number of public wires:           4
+   Number of public wire bits:      13
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 16
+     AND2_X1                         1
+     AOI21_X1                        1
+     INV_X1                          3
+     NAND2_X1                        5
+     NOR2_X1                         2
+     OAI21_X1                        2
+     OAI22_X1                        2
+
+   Chip area for module '\gf4_decode_fixed': 14.098000
+
+=== gf4_pe ===
+
+   Number of wires:                438
+   Number of wire bits:            555
+   Number of public wires:          15
+   Number of public wire bits:     101
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                455
+     AND2_X1                        18
+     AND3_X1                         7
+     AND4_X1                         1
+     AOI211_X1                       5
+     AOI21_X1                       59
+     AOI22_X1                        3
+     DFFR_X1                        32
+     INV_X1                         23
+     MUX2_X1                         1
+     NAND2_X1                       50
+     NAND3_X1                        9
+     NAND4_X1                        3
+     NOR2_X1                        28
+     NOR3_X1                         7
+     NOR4_X1                         1
+     OAI211_X1                       4
+     OAI21_X1                       68
+     OAI22_X1                        3
+     OR2_X1                         16
+     OR3_X1                          4
+     OR4_X1                          4
+     XNOR2_X1                       77
+     XOR2_X1                        31
+     gf4_decode_fixed                1
+
+   Area for cell type \gf4_decode_fixed is unknown!
+
+   Chip area for module '\gf4_pe': 655.158000
+
+=== design hierarchy ===
+
+   gf4_pe                            1
+     gf4_decode_fixed                1
+
+   Number of wires:                450
+   Number of wire bits:            576
+   Number of public wires:          19
+   Number of public wire bits:     114
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                470
+     AND2_X1                        19
+     AND3_X1                         7
+     AND4_X1                         1
+     AOI211_X1                       5
+     AOI21_X1                       60
+     AOI22_X1                        3
+     DFFR_X1                        32
+     INV_X1                         26
+     MUX2_X1                         1
+     NAND2_X1                       55
+     NAND3_X1                        9
+     NAND4_X1                        3
+     NOR2_X1                        30
+     NOR3_X1                         7
+     NOR4_X1                         1
+     OAI211_X1                       4
+     OAI21_X1                       70
+     OAI22_X1                        5
+     OR2_X1                         16
+     OR3_X1                          4
+     OR4_X1                          4
+     XNOR2_X1                       77
+     XOR2_X1                        31
+
+   Chip area for top module '\gf4_pe': 669.256000
+

@@ -1,0 +1,96 @@
+% GF4 computational flow -- standalone TikZ figure for the paper.
+% Compile on its own with pdflatex, or drop the \begin{tikzpicture}...\end{tikzpicture}
+% block into a figure*/figure environment in the manuscript.
+\documentclass[tikz,border=6pt]{standalone}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usepackage[T1]{fontenc}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+
+\begin{document}
+
+% ---- palette ------------------------------------------------------------
+\definecolor{gf4}{HTML}{B4610F}      % accent: the GF4 datapath
+\definecolor{gf4fill}{HTML}{FAEBD9}
+\definecolor{rot}{HTML}{0C7A69}      % Hadamard rotation (folds out)
+\definecolor{rotfill}{HTML}{DFF0ED}
+\definecolor{wt}{HTML}{37568A}       % weight-side, offline
+\definecolor{wtfill}{HTML}{E6EBF3}
+\definecolor{ink}{HTML}{1B2027}
+\definecolor{muted}{HTML}{5A626C}
+\definecolor{line}{HTML}{C6CCD4}
+
+\begin{tikzpicture}[
+  font=\sffamily,
+  >={Stealth[length=2.4mm]},
+  box/.style   ={rounded corners=2pt, draw=line, line width=.7pt, fill=white,
+                 align=center, inner sep=4pt, text=ink, minimum height=11mm},
+  wtbox/.style ={box, draw=wt,  fill=wtfill},
+  rotbox/.style={box, draw=rot, fill=rotfill},
+  flow/.style  ={->, draw=ink, line width=.8pt},
+  wtflow/.style={->, draw=wt,  line width=.8pt},
+  band/.style  ={font=\ttfamily\scriptsize, text=#1},
+  lab/.style   ={font=\ttfamily\footnotesize, text=muted},
+]
+
+% ============================ OFFLINE BAND ================================
+\node[band=wt, anchor=west] (obn) at (0,3.55) {OFFLINE $\cdot$ ONCE $\cdot$ DATA-FREE};
+
+\node[wtbox]  (W)   at (0.9,2.6) {\textbf{$W$}\\[1pt]\scriptsize\textcolor{muted}{FP16 weights}};
+\node[rotbox, right=6mm of W]  (Wfold)
+      {Hadamard fold\\[1pt]\ttfamily\footnotesize\textcolor{rot}{$W\!\leftarrow\!W\!\cdot\!H$}};
+\node[box,    right=6mm of Wfold] (nvfp4)
+      {NVFP4 $\cdot$ round-to-nearest\\[1pt]\ttfamily\scriptsize\textcolor{muted}{E2M1 levels + E4M3 scale/16}};
+\node[wtbox,  right=6mm of nvfp4] (Wq)
+      {\textbf{$\widehat{W}$}\\[1pt]\scriptsize\textcolor{muted}{stored 4-bit}};
+
+\draw[wtflow] (W) -- (Wfold);
+\draw[flow]   (Wfold) -- (nvfp4);
+\draw[flow]   (nvfp4) -- (Wq);
+
+% ============================ ONLINE BAND =================================
+\node[band=gf4, anchor=west] (obn2) at (0,-0.35) {ONLINE $\cdot$ PER TOKEN};
+
+\node[box]    (x)    at (0.9,-1.4) {\textbf{$x$}\\[1pt]\scriptsize\textcolor{muted}{FP16 activations}};
+\node[rotbox, right=6mm of x] (xrot)
+      {Hadamard rotate\\[1pt]\ttfamily\footnotesize\textcolor{rot}{$x\!\to\!x\!\cdot\!H$}};
+
+% ---- GF4 datapath (accent anchor) ----
+\node[box, draw=gf4, fill=gf4fill, line width=1.3pt,
+      right=6mm of xrot, minimum height=26mm, minimum width=40mm,
+      text width=38mm, align=left] (gf4box)
+      {{\ttfamily\scriptsize\textcolor{gf4}{DATAPATH}}\\[1pt]
+       \textcolor{gf4}{\textbf{GF4 activation quantizer}}\\[3pt]
+       {\ttfamily\scriptsize
+       split into blocks of 16\\
+       $s=\mathrm{rms}(\text{blk})\cdot{\color{gf4}\mathbf{r}}$\\
+       $q=$ nearest GF4 LUT (8 lvl)\\
+       {\color{muted}$\times\,N$ residual passes (opt.)}\\
+       $\hat{x}=q\cdot s$}};
+
+% ---- calibration flag on r ----
+\node[box, draw=gf4, fill=gf4fill, line width=.8pt, font=\scriptsize,
+      minimum height=6mm, above=6mm of gf4box.north]
+      (cal) {${\color{gf4}\mathbf{r}}=$ clip ratio --- the one calibrated value};
+\draw[gf4, dashed, line width=.6pt] (cal.south) -- ($(gf4box.north)+(0,0)$);
+
+% ---- matmul ----
+\node[box, right=6mm of gf4box, minimum height=26mm, text width=22mm] (mm)
+      {\textbf{W4A4 matmul}\\[1pt]\scriptsize\textcolor{muted}{$\hat{x}\cdot\widehat{W}$}\\[3pt]
+       \ttfamily\scriptsize\textcolor{rot}{$(xH)(WH)^{\!\top}$}\\[-1pt]
+       \ttfamily\scriptsize $=$\\[-1pt]
+       \ttfamily\footnotesize $x\,W^{\!\top}$ (exact)};
+
+\node[box, right=6mm of mm] (out)
+      {accumulate\\[1pt]\scriptsize\textcolor{muted}{$\to$ next layer}};
+
+\draw[flow] (x) -- (xrot);
+\draw[flow] (xrot) -- (gf4box);
+\draw[flow] (gf4box) -- (mm);
+\draw[flow] (mm) -- (out);
+
+% ---- offline weights feed the online matmul ----
+\draw[wtflow, dashed] (Wq.south) -- node[lab, right=1pt, pos=.55] {loaded once} (mm.north);
+
+\end{tikzpicture}
+\end{document}

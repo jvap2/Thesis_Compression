@@ -1,0 +1,8 @@
+read_verilog -sv "phase0_decode/gf4_decode_fixed.v"
+hierarchy -top gf4_decode_fixed
+proc; opt; fsm; opt; memory; opt
+techmap; opt
+dfflibmap -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+abc -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+clean
+tee -o synth_out/phase0/area_decode_fixed_gf4.txt stat -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"

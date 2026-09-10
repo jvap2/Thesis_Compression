@@ -1,0 +1,7 @@
+# Built EDA tools — hundreds of MB, build from source, never commit.
+#   OpenSTA:  cmake -DBUILD_TESTS=OFF -DCUDD_DIR=../cudd-install/lib && make
+#   CUDD:     ./configure && make ACLOCAL=: AUTOCONF=: AUTOMAKE=: AUTOHEADER=: \
+#             && make install prefix=.../cudd-install
+/OpenSTA/
+/cudd/
+/cudd-install/

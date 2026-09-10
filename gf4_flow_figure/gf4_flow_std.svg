@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 580" font-family="'DejaVu Sans', sans-serif">
+  <defs>
+    <marker id="aInk" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#1B2027"/></marker>
+    <marker id="aWt" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#37568A"/></marker>
+  </defs>
+  <rect x="0" y="0" width="1040" height="580" fill="#FFFFFF"/>
+
+  <!-- ============= OFFLINE BAND ============= -->
+  <text x="24" y="40" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" letter-spacing="1.5" fill="#37568A" font-weight="bold">OFFLINE · ONCE · DATA-FREE</text>
+  <line x1="24" y1="50" x2="1016" y2="50" stroke="#E4E8EC" stroke-width="1"/>
+
+  <rect x="24" y="68" width="140" height="60" rx="8" fill="#E6EBF3" stroke="#37568A" stroke-width="1.5"/>
+  <text x="94" y="94" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B2027">W</text>
+  <text x="94" y="113" text-anchor="middle" font-size="11.5" fill="#5A626C">FP16 weights</text>
+
+  <line x1="164" y1="98" x2="205" y2="98" stroke="#37568A" stroke-width="1.6" marker-end="url(#aWt)"/>
+
+  <rect x="208" y="68" width="176" height="60" rx="8" fill="#DFF0ED" stroke="#0C7A69" stroke-width="1.5"/>
+  <text x="296" y="92" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B2027">Hadamard fold</text>
+  <text x="296" y="113" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#0C7A69">W ← W·H</text>
+
+  <line x1="384" y1="98" x2="425" y2="98" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <rect x="428" y="68" width="250" height="60" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="553" y="92" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B2027">NVFP4 · round-to-nearest</text>
+  <text x="553" y="113" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#5A626C">E2M1 levels + E4M3 scale / 16</text>
+
+  <line x1="678" y1="98" x2="719" y2="98" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <rect x="722" y="68" width="130" height="60" rx="8" fill="#E6EBF3" stroke="#37568A" stroke-width="1.5"/>
+  <text x="787" y="94" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B2027">Ŵ</text>
+  <text x="787" y="113" text-anchor="middle" font-size="11.5" fill="#5A626C">stored 4-bit</text>
+
+  <!-- feed down to matmul -->
+  <line x1="787" y1="128" x2="787" y2="384" stroke="#37568A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#aWt)"/>
+  <text x="797" y="250" font-size="11.5" font-style="italic" fill="#37568A">loaded once</text>
+
+  <!-- ============= ONLINE BAND ============= -->
+  <text x="24" y="348" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" letter-spacing="1.5" fill="#B4610F" font-weight="bold">ONLINE · PER TOKEN</text>
+  <line x1="24" y1="358" x2="1016" y2="358" stroke="#E4E8EC" stroke-width="1"/>
+
+  <rect x="24" y="431" width="140" height="60" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="94" y="457" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B2027">x</text>
+  <text x="94" y="476" text-anchor="middle" font-size="11.5" fill="#5A626C">FP16 activations</text>
+
+  <line x1="164" y1="461" x2="205" y2="461" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <rect x="208" y="431" width="160" height="60" rx="8" fill="#DFF0ED" stroke="#0C7A69" stroke-width="1.5"/>
+  <text x="288" y="455" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B2027">Hadamard rotate</text>
+  <text x="288" y="476" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#0C7A69">x → x·H</text>
+
+  <line x1="368" y1="461" x2="409" y2="461" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <!-- GF4 DATAPATH (anchor) -->
+  <rect x="412" y="376" width="270" height="170" rx="10" fill="#FAEBD9" stroke="#B4610F" stroke-width="2.5"/>
+  <text x="426" y="399" font-family="'DejaVu Sans Mono', monospace" font-size="11" letter-spacing="1.5" fill="#B4610F" font-weight="bold">DATAPATH</text>
+  <text x="547" y="421" text-anchor="middle" font-size="15" font-weight="bold" fill="#B4610F">GF4 activation quantizer</text>
+  <line x1="428" y1="432" x2="666" y2="432" stroke="#B4610F" stroke-width="1" opacity="0.4"/>
+  <text x="428" y="454" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#1B2027">split into blocks of 16</text>
+  <text x="428" y="475" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#1B2027">s = rms(block) · <tspan fill="#B4610F" font-weight="bold">r</tspan></text>
+  <text x="428" y="496" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#1B2027">q = nearest GF4 LUT (8 lvl)</text>
+  <text x="428" y="517" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#5A626C">× N residual passes (opt.)</text>
+  <text x="428" y="538" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#1B2027">x = q · s</text>
+  <polyline points="429.5,530 432,526 434.5,530" fill="none" stroke="#1B2027" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- calibration callout -->
+  <rect x="412" y="306" width="270" height="30" rx="6" fill="#FAEBD9" stroke="#B4610F" stroke-width="1.3"/>
+  <text x="426" y="325" text-anchor="start" font-size="12" fill="#1B2027"><tspan font-family="'DejaVu Sans Mono', monospace" fill="#B4610F" font-weight="bold">r</tspan> = clip ratio — the one calibrated value</text>
+  <line x1="547" y1="336" x2="547" y2="376" stroke="#B4610F" stroke-width="1.2" stroke-dasharray="3 3"/>
+
+  <line x1="682" y1="461" x2="723" y2="461" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <!-- matmul -->
+  <rect x="726" y="386" width="130" height="150" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="791" y="414" text-anchor="middle" font-size="14.5" font-weight="bold" fill="#1B2027">W4A4 matmul</text>
+  <text x="774" y="434" text-anchor="start" font-size="11.5" fill="#5A626C">x · Ŵ</text>
+  <polyline points="775.5,426.5 778,423 780.5,426.5" fill="none" stroke="#5A626C" stroke-width="1.1" stroke-linejoin="round" stroke-linecap="round"/>
+  <line x1="742" y1="448" x2="840" y2="448" stroke="#E4E8EC" stroke-width="1"/>
+  <text x="791" y="472" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" fill="#0C7A69">(xH)(WH)ᵀ</text>
+  <text x="791" y="489" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" fill="#5A626C">=</text>
+  <text x="791" y="508" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="bold" fill="#1B2027">x Wᵀ  (exact)</text>
+
+  <line x1="856" y1="461" x2="877" y2="461" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <!-- output -->
+  <rect x="880" y="431" width="140" height="60" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="950" y="457" text-anchor="middle" font-size="14" font-weight="bold" fill="#1B2027">accumulate</text>
+  <text x="950" y="476" text-anchor="middle" font-size="11.5" fill="#5A626C">→ next layer</text>
+</svg>

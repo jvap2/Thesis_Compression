@@ -1,0 +1,312 @@
+% ============================================================================
+%  Why exponential weight averaging (EMA) improves the pruned JORTs subnetwork.
+%
+%  Standalone-compilable (pdflatex ema_variance_reduction.tex), or strip the
+%  preamble and \input the section body into the paper.
+%
+%  SEAM FOR JORTsE:  the argument below assumes a constant (or slowly varying)
+%  effective learning rate eta near the minimizer.  The auto-LR/WD update rule
+%  (JORTsE) enters exactly at Eq. (noise-floor): replace the constant eta by the
+%  per-epoch effective step eta_t of the automated schedule, and the rewind
+%  reset becomes a reset of the accumulators that set eta_t.  Marked <<JORTsE>>.
+% ============================================================================
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage[margin=1in]{geometry}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Cov}{\mathrm{Cov}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\Hess}{\bm{H}}
+\newcommand{\Sig}{\bm{\Sigma}}
+\newcommand{\thetabar}{\bar{\bm\theta}}
+
+\begin{document}
+
+\section{Why exponential weight averaging helps}
+\label{sec:ema}
+
+We give a mechanism-level argument that replacing the final iterate by an
+exponential moving average (EMA) of the weights strictly lowers the expected
+loss of the pruned subnetwork \emph{in expectation}, and that the gain is
+largest precisely in the regime our recipe creates: a high learning rate
+re-injected at the rewind epoch, over a highly sparse (hence ill-conditioned)
+model. Throughout, the pruning mask is fixed after the one-shot prune, so
+$\bm\theta$ denotes the surviving (unmasked) parameters and $L$ the masked
+training loss.
+
+\subsection{Setup: constant-step SGD has an $O(\eta)$ noise floor}
+
+Near a local minimizer $\bm\theta^\star$ of the masked loss, take the quadratic
+model
+\begin{equation}
+L(\bm\theta)\;\approx\;L^\star+\tfrac12(\bm\theta-\bm\theta^\star)^\top
+\Hess\,(\bm\theta-\bm\theta^\star),\qquad \Hess\succeq 0 .
+\end{equation}
+Stochastic gradient descent with step $\eta$ and mini-batch gradient noise of
+covariance $\Sig$ (i.e.\ $\nabla L_{\mathrm{batch}}=\Hess(\bm\theta-\bm\theta^\star)+\bm n_t$,
+$\E[\bm n_t]=\bm 0$, $\Cov[\bm n_t]=\Sig$) yields, for the centered iterate
+$\bm e_t:=\bm\theta_t-\bm\theta^\star$, the first-order vector autoregression
+\begin{equation}
+\bm e_{t+1}=(\bm I-\eta\Hess)\,\bm e_t-\eta\,\bm n_t .
+\label{eq:var1}
+\end{equation}
+Its stationary covariance $\bm C:=\Cov[\bm e_\infty]$ solves the discrete
+Lyapunov equation $\bm C=(\bm I-\eta\Hess)\bm C(\bm I-\eta\Hess)^\top+\eta^2\Sig$,
+whose first-order-in-$\eta$ solution is the continuous (Ornstein--Uhlenbeck)
+balance
+\begin{equation}
+\Hess\bm C+\bm C\Hess=\eta\,\Sig
+\quad\Longrightarrow\quad
+\boxed{\;\bm C=O(\eta)\;}.
+\label{eq:noise-floor}
+\end{equation}
+Thus constant-step SGD does \emph{not} rest at $\bm\theta^\star$; it orbits in a
+noise ball whose expected excess loss is the ``noise floor''
+\begin{equation}
+\E[L(\bm\theta_\infty)]-L^\star=\tfrac12\tr(\Hess\bm C)=O(\eta).
+\label{eq:gap-raw}
+\end{equation}
+% <<JORTsE>>  Replace the constant eta in (noise-floor) by the effective per-epoch
+% step eta_t produced by the automated LR/WD rule; C becomes O(eta_t) with eta_t
+% set by the JORTsE accumulators, and the rewind resets those accumulators.
+
+\subsection{EMA contracts the noise floor, curvature-weighted}
+
+Let the EMA of the weights with decay $\beta\in(0,1)$ be
+$\thetabar_t=\beta\,\thetabar_{t-1}+(1-\beta)\bm\theta_t$
+(our runs use $\beta=0.95$), with centered form
+$\bar{\bm e}_t=\beta\,\bar{\bm e}_{t-1}+(1-\beta)\bm e_t$.
+Work in the eigenbasis of $\Hess$; when $\Hess$ and $\Sig$ are simultaneously
+diagonalizable, direction $i$ has curvature $h_i$, stationary iterate variance
+$c_i=[\bm C]_{ii}$, and lag-one autocorrelation $\varphi_i=1-\eta h_i\in(0,1)$
+from \eqref{eq:var1}.
+
+\begin{lemma}[EMA of an AR(1) sequence]
+\label{lem:ar1}
+If $x_t$ is stationary with variance $c$ and autocorrelation $\varphi^{|\tau|}$,
+and $y_t=\beta y_{t-1}+(1-\beta)x_t$, then
+\begin{equation}
+\Cov[y]=c\;\underbrace{\frac{1-\beta}{1+\beta}\cdot
+\frac{1+\beta\varphi}{1-\beta\varphi}}_{=:~r(\beta,\varphi)} .
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+$y_t=(1-\beta)\sum_{j\ge0}\beta^j x_{t-j}$, so
+$\Cov[y]=(1-\beta)^2 c\sum_{j,k\ge0}\beta^{j+k}\varphi^{|j-k|}$. Splitting the
+double sum into its diagonal and the two symmetric off-diagonals and summing the
+geometric series,
+$\sum_{j,k\ge0}\beta^{j+k}\varphi^{|j-k|}
+=\tfrac{1}{1-\beta^2}\bigl(1+\tfrac{2\beta\varphi}{1-\beta\varphi}\bigr)
+=\tfrac{1}{1-\beta^2}\cdot\tfrac{1+\beta\varphi}{1-\beta\varphi}$.
+Multiplying by $(1-\beta)^2$ gives $r(\beta,\varphi)$.
+\end{proof}
+
+The contraction factor $r(\beta,\varphi)\le 1$ has two revealing limits:
+\begin{equation}
+\underbrace{\varphi\to 0}_{\eta h_i\to 1~\text{(stiff)}}:~
+r\to\frac{1-\beta}{1+\beta}\ll 1,
+\qquad
+\underbrace{\varphi\to 1}_{\eta h_i\to 0~\text{(flat)}}:~
+r\to 1 .
+\label{eq:limits}
+\end{equation}
+EMA averages away almost all of the noise in the \emph{stiff, high-curvature}
+directions and leaves the flat directions untouched --- exactly the right
+trade, because the stiff directions are the ones that dominate the loss.
+
+\begin{theorem}[EMA strictly lowers the expected loss]
+\label{thm:main}
+Under the quadratic--stationary model above, for any $\eta>0$ and
+$\beta\in(0,1)$,
+\begin{equation}
+\E[L(\thetabar_\infty)]-L^\star
+=\tfrac12\sum_i h_i\,c_i\,r(\beta,\varphi_i)
+\;<\;\tfrac12\sum_i h_i\,c_i
+=\E[L(\bm\theta_\infty)]-L^\star ,
+\end{equation}
+with the gap strictly positive whenever at least one curvature $h_i>0$ (so
+$\varphi_i<1$ and $r_i<1$).
+\end{theorem}
+
+\begin{proof}
+$\E[L(\bm\theta)]-L^\star=\tfrac12\tr(\Hess\Cov[\bm\theta])=\tfrac12\sum_i h_i\,\Cov[\bm\theta_i]$
+for any zero-mean stationary $\bm\theta-\bm\theta^\star$. Apply this to the raw
+iterate ($\Cov=c_i$) and to the EMA ($\Cov=c_i r_i$ by Lemma~\ref{lem:ar1}). Each
+summand obeys $h_i c_i r_i\le h_i c_i$ with strict inequality for $h_i>0$.
+\end{proof}
+
+\begin{remark}[General (non-commuting) case]
+Without simultaneous diagonalizability the closed form
+\eqref{eq:limits} is replaced by a Loewner-order statement: the EMA is a
+convex, strictly contractive linear filter of a mean-reverting process, so
+$\Cov[\thetabar]\preceq\Cov[\bm\theta]$ and therefore
+$\tr(\Hess\,\Cov[\thetabar])\le\tr(\Hess\,\Cov[\bm\theta])$. The direction of
+Theorem~\ref{thm:main} survives; only the exact factor changes.
+\end{remark}
+
+\subsection{Why the gain is large in \emph{our} recipe}
+
+Theorem~\ref{thm:main} explains that EMA helps; the following corollary explains
+why it helped \emph{here}, and why it is complementary to --- not redundant with
+--- the hyperparameter rewind.
+
+\begin{corollary}[Rewind $\times$ sparsity amplify the EMA gain]
+\label{cor:recipe}
+The absolute loss removed by EMA is
+\begin{equation}
+\Delta:=\tfrac12\sum_i h_i\,c_i\,\bigl(1-r(\beta,\varphi_i)\bigr),
+\qquad c_i=O(\eta).
+\end{equation}
+Hence:
+\begin{enumerate}
+\item[(a)] \textbf{Rewind.} Resetting the learning rate to a high value at the
+prune epoch makes $\eta$ --- and thus every $c_i=O(\eta)$ --- large again, so
+$\Delta$ scales with the re-injected step. The rewind supplies the exploration
+noise that lets the surviving subnetwork leave the pruning-damaged basin; EMA
+harvests the low-loss \emph{mean} of that exploration. This is why the rewind
+alone gave no lift (its noise is a cost with no collector), while
+rewind$+$EMA does.
+\item[(b)] \textbf{Sparsity.} Higher sparsity yields a wider, stiffer Hessian
+spectrum (larger $h_{\max}$, more directions with $\eta h_i\!\sim\!1$, i.e.\
+$r_i\!\ll\!1$). Both the weights $h_i$ and the contraction $1-r_i$ grow, so
+$\Delta$ grows with the target sparsity.
+\end{enumerate}
+\end{corollary}
+
+\subsection{Instantiation under the automated (JORTsE) schedule}
+\label{sec:jortse}
+
+The constant-$\eta$ assumption in \eqref{eq:noise-floor} is the single place where
+the automated learning-rate, weight-decay, and momentum rules enter, and making
+them explicit turns Corollary~\ref{cor:recipe}(a) from a heuristic into an
+identity.
+
+\paragraph{Automated learning rate $=$ self-annealing noise floor.}
+The auto-LR rule sets
+$\eta_k=\sqrt{b_{k-1}^2+a_{k-1}}-b_{k-1}$ with
+$a_{k-1}=\sum_{i<k}\eta_i$ and $b_{k-1}=\sum_{i<k}\eta_i^2$ (Eq.~\eqref{eq:lr} of
+the hyperparameter derivation). For $a\ll b^2$ this is
+$\eta_k\approx a_{k-1}/(2b_{k-1})$, a monotonically \emph{decaying} step.
+Substituting $\eta\to\eta_k$ in \eqref{eq:noise-floor} yields a shrinking noise
+floor $c_i=O(\eta_k)$: late in a run the schedule self-anneals and the raw
+iterate already tightens, so \emph{EMA's marginal benefit fades as
+$\eta_k\to0$}. This is why EMA on a fully annealed run buys little.
+
+\paragraph{Rewind $=$ accumulator reset $=$ noise-floor spike.}
+The rewind is precisely a reset of the auto-LR accumulators
+$a_{k-1},b_{k-1}\!\to\!0$ at the prune epoch, so $\eta_k$ jumps back to its
+warm-up value and $c_i=O(\eta_k)$ is large again. By Corollary~\ref{cor:recipe}
+the EMA gain $\Delta$ scales with this re-injected step: the rewind
+\emph{manufactures} exactly the high-$\eta$ regime in which EMA is most valuable,
+and EMA is what converts the re-injected exploration into a low-loss reported
+point. The two are complementary by construction, which is why the rewind alone
+gave no lift.
+
+\paragraph{Critically-damped momentum: an exact AR(2) contraction.}
+Critical damping sets the per-mode spectral root to
+$r_i=1-\sqrt{\eta\lambda_i}\in(0,1)$ (equivalently momentum $r_i^2$): the recurrence
+$v^{(k+1)}-(1-\eta\lambda_i+r_i^2)\,v^{(k)}+r_i^2\,v^{(k-1)}=0$ has the repeated root
+$r_i$, with $r_s=1-\sqrt{\eta_k\|g_k\|_2^2}$ for salient weights (Hessian eigenvalue
+approximated by $\|g_k\|_2^2$) and $r_u=1-\sqrt{\eta_k\alpha_k}$ for unsalient ones.
+With stochastic forcing the centered iterate is the critically-damped AR(2) process
+of Lemma~\ref{lem:ar2}; stiffness now enters through $\sqrt{\eta\lambda_i}$ rather
+than $\eta\lambda_i$. (Here $\beta$ continues to denote the EMA decay of
+Lemma~\ref{lem:ar1}; the momentum appears only through its root $r_i$.)
+
+\begin{lemma}[EMA of a critically-damped AR(2)]
+\label{lem:ar2}
+Let $x_k=2r\,x_{k-1}-r^2\,x_{k-2}+\varepsilon_k$ be the stationary critically-damped
+AR(2) process ($0<r<1$, repeated root $r$, white $\varepsilon$), and
+$y_k=\beta y_{k-1}+(1-\beta)x_k$ its EMA. Then
+\begin{equation}
+\frac{\Cov[y]}{\Cov[x]}
+=\frac{1-\beta}{1+\beta}\cdot
+\frac{\,1+\dfrac{2r\beta(1-r^2)}{1+r^2}-r^2\beta^2\,}{(1-r\beta)^2}
+\;=:\;R(\beta,r)\ \le\ 1,
+\end{equation}
+with lag-one autocorrelation $\rho_1=2r/(1+r^2)$ (Yule--Walker). Its limits recover
+Lemma~\ref{lem:ar1} with the root $r$ playing the role of the AR(1) autocorrelation:
+$R\to(1-\beta)/(1+\beta)$ as $r\to0$ (stiff, short memory) and $R\to1$ as $r\to1$
+(flat, long memory).
+\end{lemma}
+
+\begin{proof}
+As in Lemma~\ref{lem:ar1}, $y$ is the causal filter
+$y_k=(1-\beta)\sum_{j\ge0}\beta^{j}x_{k-j}$, so
+$\Cov[y]/\Cov[x]=\tfrac{1-\beta}{1+\beta}\bigl[1+2\sum_{\tau\ge1}\beta^{\tau}\rho_\tau\bigr]$.
+The AR(2) autocorrelations satisfy $\rho_\tau=2r\rho_{\tau-1}-r^2\rho_{\tau-2}$
+($\rho_0=1$, $\rho_1=2r/(1+r^2)$); their generating function is
+$\sum_{\tau\ge0}\beta^{\tau}\rho_\tau=[\,1-2r^3\beta/(1+r^2)\,]/(1-r\beta)^2$, whence
+$2\sum_{\tau\ge1}\beta^{\tau}\rho_\tau=[\,4r\beta/(1+r^2)-2r^2\beta^2\,]/(1-r\beta)^2$.
+Combining over the common denominator $(1-r\beta)^2$ gives $R(\beta,r)$.
+\end{proof}
+
+Because $r_i=1-\sqrt{\eta\lambda_i}<1-\eta\lambda_i$, the momentum process has a
+\emph{smaller} spectral root than the overdamped AR(1) iterate of
+Lemma~\ref{lem:ar1} at the same $(\eta,\lambda_i)$ --- shorter memory --- so EMA
+contracts the stiff modes at least as hard. Since $R(\beta,r_i)\le1$ mode-wise,
+Theorem~\ref{thm:main} holds verbatim with $r(\beta,\varphi_i)\!\to\!R(\beta,r_i)$;
+the momentum-free Lemma~\ref{lem:ar1} is the $r_i\!\to\!\varphi_i$ special case.
+
+\paragraph{Saliency split (``Jenks before prune, off after'').}
+Before the prune epoch the momentum partition is active: salient weights follow
+$\beta_s$ (Hessian-curvature damping toward $\bm\theta^\star$) while the
+to-be-pruned unsalient weights follow $\beta_u$ (weight-decay damping toward
+$\bm 0$), so saliency shapes the training dynamics. After the one-shot prune the
+unsalient coordinates are removed and only $\beta_s$ remains --- the saliency
+mechanism switches off, and the analysis above (single mean-reverting process on
+the surviving weights) applies verbatim to the post-prune, EMA-averaged phase.
+
+\paragraph{Automated weight decay attacks the complementary factor.}
+The excess loss is the product $\tfrac12\tr(\Hess\,\bm C)$. The auto-WD rule
+$\alpha_k=-P_k+\sqrt{P_k^2+M_k/\eta_k}$ (Eq.~\eqref{eq:wd}) minimizes the running
+weight magnitude, targeting the two Zhang \emph{et al.} pruning metrics (small
+$\tr\Hess$, small $\sum|\theta|$) and thereby shrinking the $\Hess$ factor; EMA
+shrinks the $\bm C$ factor. The two automations act on orthogonal factors of the
+same trace, so their gains multiply rather than overlap.
+
+\begin{remark}[Lag-bias in the post-rewind transient, resolved by critical damping]
+Lemma~\ref{lem:ar2} bounds the \emph{stationary} variance; immediately after the
+rewind the mean has not yet returned to $\bm\theta^\star$. The deterministic
+transient of a critically-damped mode decays as $(1+c\,k)\,r_i^{\,k}$, and an EMA
+lags a moving mean by ${\approx}\,\beta/(1-\beta)$ steps, so during this transient
+the average is \emph{biased} and can carry more error than the raw iterate --- EMA
+is not free early. Two facts contain it: (i) the schedule evaluates and checkpoints
+the average only after the prune epoch and keeps the best (\texttt{best\_ema}),
+discarding the bias-dominated epochs; and (ii) critical damping is the
+\emph{shortest} non-oscillatory transient --- a repeated root minimizes settling
+time, less damping oscillates and more damping is slower --- so the bias window is
+as short as the dynamics allow. The momentum automation thus compresses exactly the
+regime in which EMA is unreliable, which is why harvesting the average \emph{after}
+the rewind is safe.
+\end{remark}
+
+\begin{remark}[Relation to Polyak--Ruppert averaging]
+As $\beta\to1$ the EMA becomes a running mean, the forgetting analogue of
+Polyak--Ruppert iterate averaging, whose tail average attains the statistically
+optimal covariance $\Hess^{-1}\Sig\,\Hess^{-1}$ at the $O(1/t)$ rate,
+independent of the (slowly decaying) step. EMA is the non-stationary-friendly
+form suited to training that is still moving, e.g.\ just after a rewind.
+\end{remark}
+
+\begin{remark}[Assumptions, stated honestly]
+The claim is improvement \emph{in expectation}, not for every seed. It uses
+(i) a fixed post-prune mask (true: one-shot), (ii) a local quadratic with
+stationary gradient noise (accurate as the LR re-anneals after the rewind
+spike, not at the spike itself), and (iii) co-diagonalizability of $\Hess,\Sig$
+only for the closed form --- the trace inequality holds in general. The
+constant-$\eta$ assumption in \eqref{eq:noise-floor} is discharged in
+Section~\ref{sec:jortse}, where the automated schedule supplies the explicit
+$\eta_k$ and the rewind is realized as the accumulator reset.
+\end{remark}
+
+\end{document}

@@ -1,0 +1,11 @@
+version: '0.4'
+estimator_plug_ins:
+  - /usr/local/share/accelergy/estimation_plug_ins
+primitive_components:
+  - /usr/local/share/accelergy/primitive_component_libs
+compound_components: []
+math_functions: []
+python_plug_ins: []
+table_plug_ins:
+    roots:
+      - /usr/local/share/accelergy/table_plug_ins

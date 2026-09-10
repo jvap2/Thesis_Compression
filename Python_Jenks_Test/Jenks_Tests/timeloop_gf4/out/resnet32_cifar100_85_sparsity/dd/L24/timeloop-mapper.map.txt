@@ -1,0 +1,21 @@
+DRAM [ Weights:8192 (8192) Inputs:4096 (4096) Outputs:8192 (8192) ] 
+-------------------------------------------------------------------
+| for N in [0:4)
+
+global_buffer [ Weights:8192 (8192) Inputs:1024 (1024) ] 
+--------------------------------------------------------
+|   for K in [0:2)
+|     for C in [0:16)
+|       for C in [0:4) (Spatial-Y)
+|         for K in [0:16) (Spatial-X)
+
+weight_reg [ Weights:4 (4) ] 
+----------------------------
+|           for N in [0:4)
+|             for K in [0:4)
+
+input_reg [ ] 
+psum_reg [ ] 
+------------
+|               for N in [0:4)
+|                 << Compute >>

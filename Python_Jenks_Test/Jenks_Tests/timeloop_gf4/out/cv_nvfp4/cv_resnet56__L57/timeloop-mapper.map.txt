@@ -1,0 +1,9 @@
+DRAM [ Weights:640 (640) Inputs:64 (64) Outputs:10 (10) ] 
+global_buffer [ ] 
+weight_reg [ Inputs:64 (64) ] 
+input_reg [ Outputs:10 (10) ] 
+psum_reg [ ] 
+------------
+| for K in [0:10)
+|   for C in [0:64)
+|     << Compute >>

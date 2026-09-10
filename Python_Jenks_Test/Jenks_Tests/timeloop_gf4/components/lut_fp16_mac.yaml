@@ -1,0 +1,64 @@
+# Compound component: a LUT-GF4 PE with a REALISTIC 16-bit multiplier.
+#
+# Identical to lut_fp4_mac.yaml (4-bit operand CODES, 8-entry decode LUT) EXCEPT
+# the multiplier operates on the DECODED magnitudes at 16 bits. GF4's levels are
+# not 4-bit-representable, so a genuine 4-bit GF4 multiply does not exist; the
+# 4-bit code indexes a codebook of higher-precision magnitudes that then feed an
+# ordinary (~16-bit) multiplier. Operand traffic/storage stays 4-bit (the codes);
+# only the post-decode multiply widens.
+#
+# Decomposition (same problems, same array):
+#   (lut_fp16_mac - fp4_mac)     = decode LUT + wider-multiply overhead (realistic)
+#   (lut_fp16_mac - lut_fp4_mac) = the wider-multiply penalty alone
+#   (lut_fp4_mac  - fp4_mac)     = decode-only overhead (the current model)
+#
+# The multiply is the Aladdin fpmac primitive at fp16 (exponent 5, mantissa 10),
+# the faithful cost of multiplying decoded magnitudes. For an FP8 point (less
+# pessimistic), set exponent/mantissa to E4M3 (4/3) or E5M2 (5/2) and lut_width 8.
+compound_components:
+  version: 0.3
+  classes:
+    - name: lut_fp16_mac
+      attributes:
+        technology: "45nm"
+        datawidth: 4              # 4-bit operand CODES (traffic unchanged vs GF4/NVFP4)
+        lut_entries: 8            # symmetric magnitude codebook (3-bit index; sign at MAC)
+        lut_width: 16             # decoded magnitude carried at 16b (GF4 levels not 4-bit)
+      subcomponents:
+        - name: lut
+          class: regfile          # 8x16b magnitude codebook at the PE
+          attributes:
+            depth: 8
+            width: 16
+            datawidth: 16
+            n_rdwr_ports: 2
+        - name: mac
+          class: fpmac            # fp16 multiply+add on DECODED magnitudes (Aladdin fpmac primitive)
+          attributes:
+            exponent: 5           # fp16 = 1 sign + 5 exponent + 10 mantissa
+            mantissa: 10
+      actions:
+        - name: mac_random
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: read, repeat: 2}    # weight code + activation code
+            - name: mac
+              actions:
+                - {name: mac_random}
+        - name: mac_gated
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: idle}
+            - name: mac
+              actions:
+                - {name: mac_gated}
+        - name: idle
+          subcomponents:
+            - name: lut
+              actions:
+                - {name: idle}
+            - name: mac
+              actions:
+                - {name: idle}

@@ -1,0 +1,29 @@
+# Sparseloop SAF: SKIP zero-weight ops on the GF4-Engine, BITMASK metadata variant.
+# ---------------------------------------------------------------------------
+# Identical skipping SAF to skip_zeros.yaml, but the compressed weight format is
+# `B` (bitmask: 1 metadata bit per element) instead of `UOP` (uncompressed-offset
+# pairs: a full coordinate per NONZERO).  Motivation: skip_zeros.yaml found the
+# ENERGY win cancelled by UOP metadata overhead (energy-optimal mapping falls back
+# to dense ~17.5 pJ/op).  At the low densities here (~14% nonzero) a 1-bit-per-
+# element bitmask is cheaper than storing a coordinate per nonzero, so this variant
+# tests whether cheaper metadata turns the latency-only win into an energy win too.
+#
+# Same placement rule as the UOP variant: representation-format on Weights lives at
+# weight_reg (per-PE, below the 16x16 spatial fanout); DRAM/global_buffer placement
+# gives 'no valid mappings' (compressed weights can't scatter across the 256 PEs).
+sparse_optimizations:
+  version: 0.3
+  targets:
+    - name: weight_reg
+      representation-format:
+        data-spaces:
+          - name: Weights
+            ranks:
+              - format: B
+      action-optimization:
+        - type: skipping
+          target: Outputs
+          condition-on: [Weights]
+        - type: skipping
+          target: Inputs
+          condition-on: [Weights]

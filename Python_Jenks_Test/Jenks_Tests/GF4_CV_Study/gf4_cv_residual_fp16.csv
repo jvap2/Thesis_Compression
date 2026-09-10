@@ -1,0 +1,5 @@
+model,dataset,block_size,fp32,w4a4_skip_fp16,w4a4_skip_4bit,skip_fp16_gain
+ResNet-32,cifar10,9,93.22,86.66,83.03,3.63
+ResNet-56,cifar10,9,94.26,91.12,88.27,2.85
+ResNet-32,cifar100,9,70.15,52.23,47.1,5.13
+ResNet-56,cifar100,9,72.63,53.46,44.39,9.07

@@ -1,0 +1,40 @@
+% Table 1: structured channel harvest (#1). Complete.
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Structured channel harvesting of the pruned checkpoints. The compact
+    model is built by deleting emergently-dead channels and is \emph{exactly
+    lossless} (maximum double-precision output deviation $<10^{-12}$; no
+    fine-tuning). Throughput is measured on an NVIDIA RTX~4080 at batch $256$.
+    Upper block: high-sparsity feed-forward networks, where harvesting is large.
+    Lower block: networks where it is negligible---low-sparsity feed-forward
+    models (below the emergence threshold) and all residual/dense models (whose
+    skip/concatenation coupling leaves $0$ channels losslessly removable).}
+  \label{tab:harvest}
+  \begin{tabular}{l r r r r c}
+    \toprule
+    Model & Sparsity & \multicolumn{2}{c}{Params (M)} & Comp. & GPU $\times$ \\
+    \cmidrule(lr){3-4}
+          & (\%)     & full & compact & & (fp16/fp32) \\
+    \midrule
+    VGG-19 (CIFAR-100)   & 98.9 & 20.08 & 1.66  & $12.1\times$ & $3.1/4.2$ \\
+    VGG-19 (CIFAR-10)    & 99.5 & 20.04 & 1.87  & $10.7\times$ & $2.1/2.8$ \\
+    LeNet-5              & 99.5 & 0.43  & 0.046 & $9.4\times$  & $\sim\!1$\,$^{\dagger}$ \\
+    VGG-19 (TinyImageNet)& 97.9 & 20.13 & 5.09  & $4.0\times$  & $2.0/2.3$ \\
+    LeNet-300            & 97.9 & 0.27  & 0.097 & $2.8\times$  & $\sim\!1$\,$^{\dagger}$ \\
+    \midrule
+    VGG-19 (CIFAR-10)    & 90.9 & 20.04 & 18.20 & $1.1\times$  & $\sim\!1$ \\
+    VGG-19 (CIFAR-100)   & 89.4 & 20.08 & 20.06 & $1.0\times$  & $\sim\!1$ \\
+    VGG-19 (TinyImageNet)& 86.8 & 20.13 & 20.13 & $1.0\times$  & $\sim\!1$ \\
+    ResNet-32 (CIFAR-10) & 87.9 & 1.86  & 1.86  & $1.0\times$  & $\sim\!1$ \\
+    ResNet-32 (CIFAR-100)& 86.3 & 1.87  & 1.87  & $1.0\times$  & $\sim\!1$ \\
+    ResNet-32 (TinyImageNet)& 89.4 & 1.89 & 1.89 & $1.0\times$ & $\sim\!1$ \\
+    DenseNet-40 (CIFAR-10)& 84.5 & 1.06 & 1.06  & $1.0\times$  & $\sim\!1$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{2pt}
+  {\footnotesize $^{\dagger}$LeNet models are too small to be compute-bound on a
+  GPU (kernel-launch dominated); their harvest manifests in
+  parameters/energy and on CPU/edge targets rather than in GPU throughput.}
+\end{table}

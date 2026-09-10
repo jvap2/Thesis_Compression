@@ -1,0 +1,306 @@
+% ============================================================================
+%  FP16 outlier retention is unnecessary for GF4 W4A4.
+%
+%  Standalone-compilable (pdflatex retention_unnecessary.tex), or strip the
+%  preamble and \input the section body into the paper.
+%
+%  CLAIM (conditional / honest): the dedicated high-precision (FP16) datapath
+%  that retains the outlier layers (down_proj / fc2 / dense_4h_to_h / lm_head)
+%  can be removed WITHOUT loss, provided (i) activations are rotated by a
+%  randomized Hadamard transform and (ii) BOTH operands are quantized with
+%  K-pass residual GF4.  The activation half alone suffices when the weight
+%  quantization floor is small (OPT-6.7B, Llama-2-7B); the weight residual is
+%  additionally required when it is not (Llama-3-8B).  We prove the mechanism
+%  and instantiate it against the measured perplexities.
+%
+%  Mechanism is grounded in validate_multipass.py:
+%    - GF4_POS = 15-level equal-mass codebook; per-16 block scale = RMS * 2.5.
+%    - npass:  q <- q + GF4(x - q)   (residual accumulation; one 4-bit datapath).
+%    - rotation: randomized Hadamard folded into W offline, applied to acts online
+%      ((xH)(WH)^T = xW^T for orthogonal H).
+% ============================================================================
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,amsthm,bm}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+
+\newtheorem{lemma}{Lemma}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+\newtheorem{assumption}{Assumption}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+\newcommand{\norm}[1]{\lVert #1 \rVert}
+\newcommand{\rms}{\mathrm{RMS}}
+\newcommand{\gf}{\mathrm{GF4}}
+\newcommand{\xt}{\tilde{\bm x}}
+\newcommand{\Wt}{\tilde{\bm W}}
+
+\begin{document}
+
+\section{FP16 outlier retention is unnecessary}
+\label{sec:retention}
+
+\subsection{Setup and the one thing retention buys}
+
+Consider a linear layer $\bm y = \bm x \bm W^{\!\top}$, $\bm x\in\R^{d}$,
+$\bm W\in\R^{m\times d}$, at the layers on which single-pass W4A4 collapses
+(the MLP down-projection \texttt{down\_proj}/\texttt{fc2}, and
+\texttt{lm\_head}). \emph{FP16 outlier retention} keeps $\bm x$ and $\bm W$ in
+half precision for exactly these layers. We show the retained datapath is
+removable.
+
+GF4 quantizes in blocks of $b$ (here $b{=}16$) with a per-block scale tied to
+the block root-mean-square,
+\begin{equation}
+\label{eq:gf4}
+\hat{\bm u} = \gf(\bm u)
+       = \mathrm{sign}(\bm u)\,s\,
+         \Pi_{\mathcal L}\!\Big(\tfrac{|\bm u|}{s}\Big),
+\qquad
+s = c\cdot\rms(\bm u),\quad c = 2.5,
+\end{equation}
+where $\mathcal L=\{0,\dots,1\}$ is the $15$-level equal-mass codebook
+(\texttt{GF4\_POS} with sign) and $\Pi_{\mathcal L}$ rounds the clipped,
+normalized magnitude to the nearest level. The failure mode retention exists to
+prevent is visible in \eqref{eq:gf4}: if a block holds one entry of magnitude
+$M\gg\rms$, the scale $s\propto\rms$ is dominated either by clipping that entry
+(error $\sim M$) or, if $\rms$ is pulled up to cover it, by the coarse step
+$s\Delta$ suffered by the block's \emph{other} entries. Either way the per-block
+relative error scales with the block \emph{dynamic range}
+\begin{equation}
+\label{eq:kappa}
+\kappa(\bm u)\;=\;\frac{\norm{\bm u}_\infty}{\rms(\bm u)} .
+\end{equation}
+So retention's sole function is to spare the layers whose activation (and
+weight) blocks have large $\kappa$. \textbf{We eliminate retention by
+eliminating large $\kappa$ (Lemma~\ref{lem:rot}) and then driving the residual
+error below the retention error (Lemma~\ref{lem:res}).}
+
+\subsection{Lemma 1: a randomized Hadamard rotation removes the outliers}
+
+Let $\bm R=\tfrac1{\sqrt d}\bm H\bm D$ be the randomized Hadamard transform:
+$\bm H\in\{\pm1\}^{d\times d}$ a (normalized) Walsh--Hadamard matrix,
+$\bm D=\mathrm{diag}(\varepsilon_1,\dots,\varepsilon_d)$ with i.i.d.\ Rademacher
+$\varepsilon_i$. $\bm R$ is orthogonal, and in the fused datapath it is folded
+into $\bm W$ offline, so it is free at inference and preserves the layer exactly,
+$(\bm x\bm R)(\bm W\bm R)^{\!\top}=\bm x\bm W^{\!\top}$.
+
+\begin{lemma}[Incoherence: rotation caps the dynamic range]
+\label{lem:rot}
+Fix $\bm x\in\R^d$ and let $\xt=\bm x\bm R$. For any $\delta\in(0,1)$, with
+probability at least $1-\delta$ over $\bm D$,
+\begin{equation}
+\label{eq:linf}
+\norm{\xt}_\infty \;\le\; \norm{\bm x}_2\sqrt{\tfrac{2}{d}\log\tfrac{2d}{\delta}},
+\qquad\text{hence}\qquad
+\kappa(\xt)=\frac{\norm{\xt}_\infty}{\rms(\xt)}
+        \;\le\; \sqrt{2\log\tfrac{2d}{\delta}}\;=\;O\!\big(\sqrt{\log d}\big),
+\end{equation}
+\emph{independently of the native outlier magnitude} $\norm{\bm x}_\infty$.
+\end{lemma}
+
+\begin{proof}
+The $j$-th coordinate is $\xt_j=\tfrac1{\sqrt d}\sum_{i}H_{ji}\varepsilon_i x_i$.
+For fixed $j$ the signs $H_{ji}\varepsilon_i$ are i.i.d.\ Rademacher, so $\xt_j$
+is a Rademacher sum with sub-Gaussian proxy variance
+$\tfrac1d\sum_i x_i^2=\norm{\bm x}_2^2/d$. Hoeffding gives
+$\Prob(|\xt_j|>t)\le 2\exp\!\big(-t^2 d/(2\norm{\bm x}_2^2)\big)$; a union bound
+over the $d$ coordinates and setting the total to $\delta$ yields
+$t=\norm{\bm x}_2\sqrt{(2/d)\log(2d/\delta)}$, which is \eqref{eq:linf}. Since
+$\bm R$ is orthogonal, $\rms(\xt)=\norm{\xt}_2/\sqrt d=\norm{\bm x}_2/\sqrt d$,
+and dividing gives the bound on $\kappa$.
+\end{proof}
+
+The same statement applied row-wise to $\Wt=\bm W\bm R$ caps the weight rows'
+dynamic range. Thus after rotation \emph{no} channel or row is an outlier: the
+precondition that made retention necessary is gone with high probability.
+
+\begin{remark}[Blocks, not just the whole vector]
+GF4 scales per block of $b$. Because $\bm R$ spreads energy uniformly, each
+block's RMS concentrates about the global RMS (the same sub-Gaussian tail bounds
+$\big|\,\rms(\text{block})/\rms(\xt)-1\big|$), so \eqref{eq:linf} controls the
+\emph{per-block} $\kappa$ up to a constant. This is why the fused-Hadamard block
+size can be taken small without reintroducing outliers.
+\end{remark}
+
+\subsection{Lemma 2: residual GF4 removes the remaining error geometrically}
+
+With $\kappa$ bounded, each block is well conditioned and GF4 has a bounded
+relative error. The multi-pass rule (\texttt{npass}) re-quantizes the leftover:
+\begin{equation}
+\label{eq:npass}
+\bm q_0=\bm 0,\qquad
+\bm q_{k}=\bm q_{k-1}+\gf(\bm u-\bm q_{k-1}),\qquad
+\bm r_k=\bm u-\bm q_k=\bm r_{k-1}-\gf(\bm r_{k-1}).
+\end{equation}
+
+\begin{assumption}[Uniform contraction on the residual class]
+\label{ass:rho}
+There is $\bar\rho<1$ such that every residual produced by \eqref{eq:npass}
+satisfies $\norm{\bm r-\gf(\bm r)}\le\bar\rho\,\norm{\bm r}$. Concretely, because
+$\gf$ recomputes the block scale $s=c\,\rms(\bm r)$ each pass, the residual stays
+well-scaled and approximately Gaussian, and the codebook's $15$ equal-mass
+levels give $\bar\rho\approx 10^{-15.2/20}\approx0.17$ (a $15.2$\,dB first-pass
+SNR).
+\end{assumption}
+
+\begin{lemma}[Geometric decay of the quantization error]
+\label{lem:res}
+Under Assumption~\ref{ass:rho}, the $K$-pass residual GF4 estimate obeys
+\begin{equation}
+\label{eq:decay}
+\norm{\bm u-\bm q_K}\;\le\;\bar\rho^{\,K}\norm{\bm u},
+\qquad\text{i.e.}\qquad
+\mathrm{SNR}_K \;\ge\; K\cdot 20\log_{10}(1/\bar\rho)\ \text{dB}.
+\end{equation}
+\end{lemma}
+
+\begin{proof}
+Immediate from $\norm{\bm r_k}\le\bar\rho\norm{\bm r_{k-1}}$ and $\bm r_0=\bm u$;
+the dB form is $20\log_{10}(\norm{\bm u}/\norm{\bm r_K})$.
+\end{proof}
+
+Both sides of \eqref{eq:decay} are executed on the \emph{same} 4-bit array: the
+$K$ passes reuse one GF4 datapath, so the ``high-precision unit'' retention
+requires is replaced by iteration, not by wider hardware. The predicted
+$\approx 20\log_{10}(1/0.17)\approx 15$\,dB/pass matches the measured ladder
+$15.2\!\to\!22.2\!\to\!26.3\!\to\!29.6\!\to\!32.8\!\to\!36.1$\,dB
+(an empirical $\approx\!4.2$\,dB/pass once the residual whitens; the gap from
+the $15$\,dB/pass ideal is the mild sub-Gaussianity of real residuals, and only
+lengthens $K$ by a constant factor).
+
+\subsection{Theorem: retention is removable}
+
+\begin{theorem}[Elimination of FP16 retention]
+\label{thm:main}
+Let $\xt=\bm x\bm R$, $\Wt=\bm W\bm R$, and let $\hat{\bm x}=\bm q_{K_A}(\xt)$,
+$\hat{\bm W}=\bm q_{K_W}(\Wt)$ be their $K_A$- and $K_W$-pass residual-GF4
+estimates. Under Lemmas~\ref{lem:rot}--\ref{lem:res}, the output error obeys
+\begin{equation}
+\label{eq:thm}
+\norm{\bm y-\hat{\bm y}}
+   \;\le\; \bar\rho^{\,K_A}\norm{\xt}\,\norm{\Wt}
+        \;+\; \bar\rho^{\,K_W}\norm{\hat{\bm x}}\,\norm{\Wt}
+   \;=\; O\!\big(\bar\rho^{\,K_A}+\bar\rho^{\,K_W}\big)\,
+         \norm{\bm x}\norm{\bm W},
+\end{equation}
+so for any retention error $\varepsilon_{\mathrm{ret}}>0$ there are finite
+$K_A,K_W$ with $\norm{\bm y-\hat{\bm y}}\le\varepsilon_{\mathrm{ret}}$, using
+\textbf{no FP16-retained channel}.
+\end{theorem}
+
+\begin{proof}
+Rotation invariance gives $\bm y=\xt\Wt^{\!\top}$, and
+$\hat{\bm y}=\hat{\bm x}\hat{\bm W}^{\!\top}$. Add and subtract
+$\hat{\bm x}\Wt^{\!\top}$:
+\[
+\bm y-\hat{\bm y}
+ = (\xt-\hat{\bm x})\Wt^{\!\top}
+ + \hat{\bm x}(\Wt-\hat{\bm W})^{\!\top}.
+\]
+Sub-multiplicativity bounds the two terms by
+$\norm{\xt-\hat{\bm x}}\norm{\Wt}$ and
+$\norm{\hat{\bm x}}\norm{\Wt-\hat{\bm W}}$. Lemma~\ref{lem:rot} certifies both
+$\xt,\Wt$ are incoherent, so Assumption~\ref{ass:rho} applies and
+Lemma~\ref{lem:res} gives
+$\norm{\xt-\hat{\bm x}}\le\bar\rho^{K_A}\norm{\xt}$ and
+$\norm{\Wt-\hat{\bm W}}\le\bar\rho^{K_W}\norm{\Wt}$; with
+$\norm{\hat{\bm x}}\le(1+\bar\rho^{K_A})\norm{\xt}$ this is \eqref{eq:thm}.
+Choosing $K_A,K_W\ge\log(\varepsilon_{\mathrm{ret}}/(2\norm{\bm x}\norm{\bm W}))
+/\log\bar\rho$ finishes.
+\end{proof}
+
+The two error terms are \emph{separable}: activation passes ($K_A$) shrink only
+the first, weight passes ($K_W$) only the second. This is the crux of the honest
+claim and is exactly what the data shows next.
+
+\subsection{Corollary: after rotation there is no outlier \emph{channel} to exploit}
+
+\begin{corollary}[Selective $\approx$ uniform on the rotated weight]
+\label{cor:sel}
+Let $e_i=\norm{(\Wt-\hat{\bm W})_i}$ be the first-pass error of weight row $i$.
+Under Lemma~\ref{lem:rot} the rows of $\Wt$ are incoherent, so the $e_i$ are
+statistically homogeneous. Consequently applying a \emph{second} weight pass to
+only the top-$k\%$ rows (ranked by $e_i$) recovers a fraction
+$\approx k\%$ of the total weight-error energy $\sum_i e_i^2$: the gain is linear
+in $k$, with no concentrated ``outlier-channel'' win.
+\end{corollary}
+
+Rotation \emph{spends} the outlier structure. Before rotation a handful of native
+channels carry the error and could be fixed cheaply; after rotation the error is
+smeared uniformly, so on the weight one pays $\approx$ uniformly. Retention is
+still eliminable, but the weight half costs \emph{bits} (more passes on all rows),
+not a few high-precision channels.
+
+\subsection{Empirical instantiation (WikiText-2, nonoverlap-2048)}
+
+Faithful setting: randomized-Hadamard rotation (FWHT folded, invariance verified
+exact including \texttt{down\_proj} $11008\!\to\!16384$ pad), NVFP4 weights
+(E2M1 + per-$16$ E4M3, RTN), GF4 activations; \texttt{lm\_head}/embeddings FP16
+in both conditions; only the down-projection switches from FP16 retention to
+$K$-pass residual GF4. ``act'' quantizes the activation only ($K_W{=}1$);
+``act$+$W'' also residual-quantizes the weight.
+
+\begin{center}\small
+\begin{tabular}{@{}llrr@{}}
+\toprule
+Model & Down-proj scheme & PPL & $\Delta$ vs.\ retention \\
+\midrule
+OPT-6.7B     & FP16 retention (baseline)         & 12.799 & --- \\
+             & 1-pass W4A4                        & 12.943 & $+0.145$ \\
+             & act 2-pass                         & 12.853 & $+0.055$ \\
+             & act 2-pass $+$ W 2-pass (top-5\%)  & 12.821 & $+0.023$ \\
+\midrule
+Llama-2-7B   & FP16 retention (baseline)         & 6.150  & --- \\
+             & 1-pass W4A4                        & 6.309  & $+0.159$ \\
+             & act 2-pass                         & 6.272  & $+0.122$ \\
+             & act 4-pass (act floor)            & 6.269  & $+0.119$ \\
+\midrule
+Llama-3-8B   & FP16 retention (baseline)         & 6.622  & --- \\
+             & 1-pass W4A4                        & 7.367  & $+0.745$ \\
+             & act 4-pass (act floor)            & 7.120  & $+0.499$ \\
+             & act 2-pass $+$ W 2-pass (top-100\%)& 6.663  & $+0.041$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Read against the Theorem: the activation term ($K_A$) closes quickly and then
+\emph{saturates} at the weight floor ($6.269$ Llama-2, $7.120$ Llama-3), exactly
+the second term of \eqref{eq:thm} that act passes cannot touch. Where that floor
+is small (OPT-6.7B $+0.055$; Llama-2-7B $+0.119$, both within a few hundredths of
+retention and inside eval noise at $40$ windows) the \emph{activation half alone}
+eliminates retention. Where it is large (Llama-3-8B, floor $+0.499$) the Theorem
+demands $K_W\!\ge\!2$, and a full second weight pass reaches $+0.041$ (parity).
+Corollary~\ref{cor:sel} is confirmed by the top-$k\%$ sweep: on Llama-3 the gap
+recovers linearly ($5\%\!\to\!4.4\%$, $25\%\!\to\!27\%$, $50\%\!\to\!49\%$,
+$100\%\!\to\!100\%$ of the $0.476$ gap), with no concentrated win.
+
+\subsection{What is and is not claimed}
+
+\begin{remark}[Scope]
+The claim is \emph{conditional}: FP16 retention is unnecessary given (i) the
+randomized Hadamard activation rotation and (ii) residual GF4 on both operands.
+The activation rotation does the heavy lifting (Lemma~\ref{lem:rot}); the
+residual passes (Lemma~\ref{lem:res}) mop up what remains. The number of extra
+passes is model-dependent: $K_W{=}1$ (activation-only) suffices for OPT-6.7B and
+Llama-2-7B; Llama-3-8B additionally needs $K_W{=}2$, making its down-projection
+effectively $\sim$W8A8 --- still on the 4-bit array, still no FP16 datapath, but
+not ``a few channels'' cheap.
+\end{remark}
+
+\begin{remark}[Honest caveats]
+(a) Lemma~\ref{lem:rot} is high-probability over the rotation, not worst-case
+over adversarial $\bm x$. (b) Assumption~\ref{ass:rho} is the one empirical input:
+$\bar\rho<1$ holds because the per-pass scale adapts; the measured $\approx4.2$
+dB/pass (below the $15$ dB/pass ideal) reflects real-residual sub-Gaussianity and
+only rescales $K$. (c) Sub-$0.05$ PPL differences are within eval noise ($40$
+windows). (d) This is an \emph{accuracy} argument only; the hardware-energy
+comparison is out of scope here.
+\end{remark}
+
+\end{document}

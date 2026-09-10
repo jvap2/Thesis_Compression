@@ -1,0 +1,43 @@
+% ---------------------------------------------------------------------------
+% tab:gf4-energy -- REALISTIC GF4 engine energy vs the NVFP4 baseline, at fp16.
+% Unlike tab:lut (which isolates the decode), this is the bottom-line total
+% energy of the faithful GF4 datapath: 4-bit codes decoded on-chip and
+% multiplied at fp16. The total overhead decomposes exactly into the decode
+% (codebook lookup) and the fp16 multiply, the two mechanisms that separate GF4
+% from a native 4-bit format. NVFP4 is modeled as a 4-bit fixed-point MAC (the
+% faithful E2M1 proxy; Accelergy cannot represent E2M1 -- see text). Measured in
+% Timeloop/Accelergy at 45 nm on a 256-PE array, weighted over all layers.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Realistic GF4 engine energy relative to the NVFP4 baseline, with the
+  multiply performed at fp16 on the decoded operands. The total overhead splits
+  exactly into the codebook \emph{decode} and the \emph{fp16 multiply}; the
+  latter is the direct price of GF4's non-4-bit magnitudes and is single-digit
+  on the memory-bound CNNs, larger on the compute-bound language models. NVFP4
+  is modeled as a 4-bit fixed-point MAC (the faithful low-energy proxy for a
+  native E2M1 unit, which Accelergy cannot represent). Codebook area is
+  $+0.01\%$ of array area throughout.}
+  \label{tab:gf4-energy}
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    & \multicolumn{3}{c}{GF4 (fp16) energy overhead vs.\ NVFP4} \\
+    \cmidrule(lr){2-4}
+    Model & Total & \;Decode & \;fp16 mult.\ \\
+    \midrule
+    \multicolumn{4}{l}{\textit{Language models (per token)}} \\
+    OPT-125M       & $32.85\%$ & $14.57\%$ & $18.28\%$ \\
+    OPT-1.3B       & $42.67\%$ & $22.71\%$ & $19.95\%$ \\
+    Llama-2-7B     & $32.55\%$ & $21.23\%$ & $11.32\%$ \\
+    \addlinespace
+    \multicolumn{4}{l}{\textit{CNNs (per inference)}} \\
+    LeNet-300-100  & $3.40\%$  & $3.41\%$  & $0.00\%$ \\
+    LeNet-5        & $8.64\%$  & $8.63\%$  & $0.00\%$ \\
+    DenseNet-40    & $12.12\%$ & $10.11\%$ & $2.01\%$ \\
+    VGG-19         & $17.50\%$ & $16.67\%$ & $0.84\%$ \\
+    ResNet-32      & $20.82\%$ & $17.53\%$ & $3.30\%$ \\
+    ResNet-56      & $20.84\%$ & $17.63\%$ & $3.22\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

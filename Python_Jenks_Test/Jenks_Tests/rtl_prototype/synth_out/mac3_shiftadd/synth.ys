@@ -1,0 +1,10 @@
+read_verilog -sv mac_rtl/rtl/w_decode_e2m1.v
+read_verilog -sv mac_rtl/rtl/a_decode_hwcb.v
+read_verilog -sv mac_rtl/rtl/shift_add_mult.v
+hierarchy -top shift_add_mult
+proc; opt; fsm; opt; memory; opt
+techmap; opt
+dfflibmap -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+abc -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+clean
+tee -o synth_out/mac3_shiftadd/area.txt stat -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"

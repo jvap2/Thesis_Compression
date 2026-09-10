@@ -1,0 +1,115 @@
+input file: arch/nvfp4_engine.yaml
+input file: components/fp4_mac.yaml
+input file: components/lut_fp4_mac.yaml
+input file: components/lut_regfile.yaml
+input file: components/lut_sram.yaml
+input file: prob/cv_densenet40__L8.yaml
+input file: map_e.yaml
+Warning: Hyphenated keyword max-permutations-per-if-visit found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword word-bits found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword num-threads found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword live-status found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword block-size found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword optimization-metrics found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword search-size found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword victory-condition found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+Warning: Hyphenated keyword random-pruned found in inputs. Hyphenated keywords are deprecated and to be replaced with underscores. Please use the the scripts/hyphens2underscores.py in the in the Timeloop repository to update your inputs.
+  _______                __                
+ /_  __(_)___ ___  ___  / /___  ____  ____ 
+  / / / / __ `__ \/ _ \/ / __ \/ __ \/ __ \
+ / / / / / / / / /  __/ / /_/ / /_/ / /_/ /
+/_/ /_/_/ /_/ /_/\___/_/\____/\____/ .___/ 
+                                  /_/      
+
+WARNING: found neither a problem shape description nor a string corresponding to a to a pre-existing shape description. Assuming shape: cnn_layer.
+MESSAGE: attempting to read problem shape from file: /usr/local/src/timeloop/problem-shapes/cnn_layer.yaml
+Problem configuration complete.
+execute:/usr/local/bin/accelergy arch/nvfp4_engine.yaml components/fp4_mac.yaml components/lut_fp4_mac.yaml components/lut_regfile.yaml components/lut_sram.yaml prob/cv_densenet40__L8.yaml map_e.yaml --oprefix timeloop-mapper. -o out/cv_nvfp4/cv_densenet40__L8/ > timeloop-mapper.accelergy.log 2>&1
+Generate Accelergy ERT (energy reference table) to replace internal energy model.
+Generate Accelergy ART (area reference table) to replace internal area model.
+Architecture configuration complete.
+Sparse optimization configuration complete.
+Using threads = 8
+Mapper configuration complete.
+Initializing Index Factorization subspace.
+  Factorization options along problem dimension R = 1
+  Factorization options along problem dimension S = 1
+  Factorization options along problem dimension P = 1
+  Factorization options along problem dimension Q = 1
+  Factorization options along problem dimension C = 5292
+  Factorization options along problem dimension K = 126
+  Factorization options along problem dimension N = 3003
+Mapspace Dimension [IndexFactorization] Size: 2002376376
+Mapspace Dimension [LoopPermutation] Size: 3252016064102400000
+Mapspace Dimension [Spatial] Size: 8
+Mapspace Dimension [DatatypeBypass] Size: 4096
+Mapspace split! Per-split Mapping Dimension [IndexFactorization] Size: 250297047 Residue: 0
+Mapspace construction complete.
+Search configuration complete.
+Start Parsering Layout
+No Layout specified, so using bandwidth based modeling
+[  6] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C108 - L0[] N1024 K2  | Cycles = 3981312
+[  2] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C3 - L0[] N1024 K2 C36  | Cycles = 3981312
+[  1] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C2 - L0[] N1024 K2 C54  | Cycles = 3981312
+[  0] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 - L0[] N1024 K2 C108  | Cycles = 3981312
+[  5] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C9 - L0[] N1024 K2 C12  | Cycles = 3981312
+[  4] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C6 - L0[] N1024 K2 C18  | Cycles = 3981312
+[  3] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C4 - L0[] N1024 K2 C27  | Cycles = 3981312
+[  7] Utilization = 0.01 | pJ/Compute =  134.282 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C12 - L0[] N1024 K2 C9  | Cycles = 3981312
+[  6] Utilization = 0.01 | pJ/Compute =   85.798 | L4[WIO] N1 - L3[] C3 C3Y - L2[] N1 - L1[] K6 C108 - L0[W] N1024 K2  | Cycles = 3981312
+[  2] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C3 - L0[] N1024 K2 C36  | Cycles = 3981312
+[  1] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C2 - L0[] N1024 K2 C54  | Cycles = 3981312
+[  0] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 - L0[] N1024 K2 C108  | Cycles = 3981312
+[  5] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C9 - L0[] N1024 K2 C12  | Cycles = 3981312
+[  4] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C6 - L0[] N1024 K2 C18  | Cycles = 3981312
+[  3] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C4 - L0[] N1024 K2 C27  | Cycles = 3981312
+[  7] Utilization = 0.01 | pJ/Compute =   91.013 | L4[WIO] N1 - L3[W] C3 C3Y - L2[] N1 - L1[] K6 C12 - L0[] N1024 K2 C9  | Cycles = 3981312
+[  2] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C3 - L0[] N1024 K2 C36  | Cycles = 3981312
+[  1] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C2 - L0[] N1024 K2 C54  | Cycles = 3981312
+[  4] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C6 - L0[] N1024 K2 C18  | Cycles = 3981312
+[  0] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 - L0[] N1024 K2 C108  | Cycles = 3981312
+[  5] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C9 - L0[] N1024 K2 C12  | Cycles = 3981312
+[  3] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C4 - L0[] N1024 K2 C27  | Cycles = 3981312
+[  7] Utilization = 0.01 | pJ/Compute =   52.412 | L4[WIO] N1 - L3[WI] C3 C3Y - L2[] N1 - L1[] K6 C12 - L0[] N1024 K2 C9  | Cycles = 3981312
+[  6] Utilization = 0.01 | pJ/Compute =   47.197 | L4[WIO] N1 - L3[I] C3 C3Y - L2[] N1 - L1[] K6 C108 - L0[W] N1024 K2  | Cycles = 3981312
+[  1] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C2 - L0[] N1024 K2 C54  | Cycles = 3981312
+[  2] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C3 - L0[] N1024 K2 C36  | Cycles = 3981312
+[  4] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C6 - L0[] N1024 K2 C18  | Cycles = 3981312
+[  0] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 - L0[] N1024 K2 C108  | Cycles = 3981312
+[  5] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C9 - L0[] N1024 K2 C12  | Cycles = 3981312
+[  3] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C4 - L0[] N1024 K2 C27  | Cycles = 3981312
+[  7] Utilization = 0.01 | pJ/Compute =   23.625 | L4[WIO] N1 - L3[WIO] C3 C3Y - L2[] N1 - L1[] K6 C12 - L0[] N1024 K2 C9  | Cycles = 3981312
+[  6] Utilization = 0.01 | pJ/Compute =   18.410 | L4[WIO] N1 - L3[IO] C3 C3Y - L2[] N1 - L1[] K6 C108 - L0[W] N1024 K2  | Cycles = 3981312
+[  0] Utilization = 0.03 | pJ/Compute =   14.134 | L4[WIO] C9 K2 - L3[W] N2 N4Y C2Y - L2[] N32 - L1[O] C27 N4 K3 - L0[I] K2 C2  | Cycles = 1492992
+[  0] Utilization = 0.03 | pJ/Compute =   11.636 | L4[WIO] C9 K2 - L3[WI] N2 N4Y C2Y - L2[] N32 - L1[O] C27 N4 K3 - L0[I] K2 C2  | Cycles = 1492992
+[  1] Utilization = 0.03 | pJ/Compute =   18.904 | L4[WIO] C9 K2 - L3[WI] N2 N4Y C2Y - L2[] N32 C2 - L1[] K3 N4 - L0[O] K2 C27  | Cycles = 1492992
+[  5] Utilization = 0.03 | pJ/Compute =   19.857 | L4[WIO] C9 K2 - L3[WI] N2 N4Y C2Y - L2[] N32 C3 - L1[] K3 N4 - L0[O] K2 C18  | Cycles = 1492992
+[  2] Utilization = 0.03 | pJ/Compute =   22.716 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[] C3 K3 N4 - L0[O] K2 C9  | Cycles = 1492992
+[  2] Utilization = 0.03 | pJ/Compute =   21.577 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[] C3 K3 N4 - L0[IO] K2 C9  | Cycles = 1492992
+[  1] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 N4Y C2Y - L2[] N32 C2 - L1[O] K3 N4 - L0[] K2 C27  | Cycles = 1492992
+[  5] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 N4Y C2Y - L2[] N32 C3 - L1[O] K3 N4 - L0[] K2 C18  | Cycles = 1492992
+[  2] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C3 K3 N4 - L0[] K2 C9  | Cycles = 1492992
+[  2] Utilization = 0.03 | pJ/Compute =   14.350 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C3 K3 N4 - L0[I] K2 C9  | Cycles = 1492992
+[  7] Utilization = 0.03 | pJ/Compute =   18.722 | L4[WIO] C9 K2 - L3[I] N2 C2Y N4Y - L2[] N32 C3 - L1[O] C3 K3 N4 - L0[W] K2 C6  | Cycles = 1492992
+[  7] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C3 - L1[O] C3 K3 N4 - L0[] K2 C6  | Cycles = 1492992
+[  7] Utilization = 0.03 | pJ/Compute =   14.350 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C3 - L1[O] C3 K3 N4 - L0[I] K2 C6  | Cycles = 1492992
+[  4] Utilization = 0.03 | pJ/Compute =   18.722 | L4[WIO] C9 K2 - L3[I] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C27 K3 N4 - L0[W] K2  | Cycles = 1492992
+[  4] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C27 K3 N4 - L0[] K2  | Cycles = 1492992
+[  3] Utilization = 0.03 | pJ/Compute =   18.722 | L4[WIO] C9 K2 - L3[I] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C9 K3 N4 - L0[W] K2 C3  | Cycles = 1492992
+[  3] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C9 K3 N4 - L0[] K2 C3  | Cycles = 1492992
+[  4] Utilization = 0.03 | pJ/Compute =   14.350 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C27 K3 N4 - L0[I] K2  | Cycles = 1492992
+[  3] Utilization = 0.03 | pJ/Compute =   14.350 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C2 - L1[O] C9 K3 N4 - L0[I] K2 C3  | Cycles = 1492992
+[  6] Utilization = 0.03 | pJ/Compute =   15.489 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C3 - L1[O] C2 K3 N4 - L0[] K2 C9  | Cycles = 1492992
+[  6] Utilization = 0.03 | pJ/Compute =   14.350 | L4[WIO] C9 K2 - L3[WI] N2 C2Y N4Y - L2[] N32 C3 - L1[O] C2 K3 N4 - L0[I] K2 C9  | Cycles = 1492992
+[  0] STATEMENT: 250 valid mappings found, terminating search.
+[  4] STATEMENT: 250 valid mappings found, terminating search.
+[  3] STATEMENT: 250 valid mappings found, terminating search.
+[  7] STATEMENT: 250 valid mappings found, terminating search.
+[  6] STATEMENT: 250 valid mappings found, terminating search.
+[  2] STATEMENT: 250 valid mappings found, terminating search.
+[  5] STATEMENT: 250 valid mappings found, terminating search.
+[  1] STATEMENT: 250 valid mappings found, terminating search.
+
+
+Summary stats for best mapping found by mapper:
+  Utilization = 0.03 | pJ/Compute =   11.636 | Cycles = 1492992

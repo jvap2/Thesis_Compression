@@ -1,0 +1,47 @@
+% ===========================================================================
+% Motivation for the hardware-constrained codebook optimization. Opens the
+% "Hardware-Constrained Codebook Design" section (sec:Proposed / after
+% sec:sw-support). Two paragraphs: (1) the cost that survives all fusion is the
+% arbitrary-magnitude decode, and it is what caps the fused path below 2x;
+% (2) the setting -- constrain the codebook to a shift-decodable lattice and
+% SOLVE within it (not round), paying the irregularity tax once at design time.
+%
+% Ref labels used: sec:sw-support (CUDA section), tab:codebook-suite,
+% eq:codebook-opt. Adjust if your labels differ.
+%
+% NUMBER CHECK: the "$4.3$--$6\times$ over naive" range should match the kernel
+% figures actually reported in \S\ref{sec:sw-support}. That section currently
+% reports the fused GEMV at 1.5-2.9x over naive and the Hadamard kernel up to
+% 6.4x; pin this range to whichever kernel(s) the sentence refers to so the two
+% sections agree.
+% ===========================================================================
+
+Both LUT$\times$LUT and decode-at-MAC/ingress \emph{accept} GF4's high-precision
+magnitudes and pay to work around them. Fusing the Hadamard transform and the
+operand decode into the GEMV keeps every 16-bit value in registers rather than
+global memory, buying $4.3$--$6\times$ over a na\"ive unfused baseline
+(\S\ref{sec:sw-support}) --- yet under $2\times$ against an all-fp16 kernel. The
+gap that remains is not bandwidth, which the fused kernels have already removed,
+but the decode itself: GF4's levels are arbitrary magnitudes, so reconstruction
+is a lookup into a constant table that serializes on divergent codes on the GPU
+and occupies a dedicated ROM on the ASIC. This lookup is common to \emph{every}
+distribution-matched codebook, and it is what caps the fused path below
+$2\times$. Fusion hides the traffic; it cannot remove the table.
+
+To convert the format itself into the saving rather than emulating one around it,
+we constrain the codebook to hardware-representable values --- dyadic levels with
+bounded popcount, decodable by a short shift-and-add with no table and no
+divergence --- and optimize \emph{within} that constraint. The na\"ive route,
+rounding GF4's levels onto the nearest such grid, forfeits the accuracy that
+motivated a distribution-matched codebook in the first place (the rounded
+codebook is the weakest in our suite, Table~\ref{tab:codebook-suite}); we
+therefore do not round a good codebook onto the lattice but \emph{solve} for the
+best codebook \emph{on} it, so decode cost is discharged by construction and
+accuracy is recovered rather than sacrificed. Because the objective is defined on
+the RMS-normalized \emph{shape} of the operand distribution
+(Eq.~\ref{eq:codebook-opt}) --- which the randomized Hadamard renders
+approximately half-normal independent of the model --- the constrained optimum is
+a property of the format, not of any one network: it is solved once, offline, by
+exact enumeration over the lattice ($\binom{15}{6}=5005$ candidates) and reused
+unchanged everywhere. The irregularity tax is paid once at design time instead of
+on every operand at inference.

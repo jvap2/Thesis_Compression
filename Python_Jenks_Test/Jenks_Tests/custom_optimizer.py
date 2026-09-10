@@ -8,6 +8,24 @@ import time
 import gc
 from torchvision.transforms.v2 import CutMix, MixUp, RandomChoice
 
+# ─── Protect skip/projection shortcut convs from the Jenks natural break ───
+# When PROTECT_SHORTCUTS is True, any prunable param whose name contains
+# SHORTCUT_KEY (the ResNet projection-shortcut conv, e.g. 'layer2.0.downsample.0')
+# has its Jenks mask FORCED to all-ones at every compute_mask site. Effect: the
+# shortcut never goes through the natural break -> every weight is treated as
+# salient -> it receives the SAME full update as a kept weight (gradient +
+# weight_decay + sal_beta momentum) and is never decayed or gradient-zeroed, and
+# never hard-masked to zero. This mirrors GSM's parameter-free identity shortcut
+# (which cannot be pruned) while keeping our Option-B projection conv trainable.
+# Default False -> byte-identical to prior behavior. Set at runtime in a config:
+#   import custom_optimizer; custom_optimizer.PROTECT_SHORTCUTS = True
+PROTECT_SHORTCUTS = False
+SHORTCUT_KEY = 'downsample'
+
+def _protect_shortcut(name):
+    """True if this param is a shortcut conv to be kept dense/salient."""
+    return PROTECT_SHORTCUTS and name is not None and SHORTCUT_KEY in name
+
 # MixUp/CutMix augmentation toggle for train_one_step_prune_HPO.
 # MIXUP=False -> original behavior (no change). When True, each training batch is
 # randomly CutMix'd or MixUp'd (soft labels into the loss); MIXUP_OFF_EPOCH lets us
@@ -16,7 +34,22 @@ MIXUP = False
 MIXUP_OFF_EPOCH = 10**9
 
 
-def apply_gradient_centralization(model):
+# Gradient-centralization toggle. Added Feb-2026; NOT present in the Nov-2025 best run.
+# Suspected to corrupt surviving-weight gradients post-prune (per-filter mean is
+# dominated by pruned positions at high sparsity). Set custom_optimizer.GC_ENABLED=False
+# to reproduce the Nov-2025 training dynamics. Default True preserves current behavior.
+GC_ENABLED = True
+
+# Global gradient-norm clip. None = off (default, backward-compatible). Set to a float
+# (e.g. custom_optimizer.GRAD_CLIP_NORM = 5.0) to clip_grad_norm_ before each optimizer.step
+# in train_one_step_prune_HPO. Prevents the frozen-95% NaN blow-up by capping gradient MAGNITUDE
+# without distorting gradient DIRECTION (unlike GC, which zero-sums per filter and starves
+# heavily-pruned filters). Preferred NaN fix at high sparsity.
+GRAD_CLIP_NORM = None
+
+def apply_gradient_centralization(model, optimizer=None, post_prune=False):
+    if not GC_ENABLED:
+        return
     with torch.no_grad():
         for name, param in model.named_parameters():
             if param.grad is None:
@@ -24,7 +57,22 @@ def apply_gradient_centralization(model):
 
             grad = param.grad.data
             if grad.ndim > 1:  # apply only to weight tensors, not biases
-                grad.sub_(grad.mean(dim=tuple(range(1, grad.ndim)), keepdim=True))
+                dims = tuple(range(1, grad.ndim))
+                m = None
+                if post_prune and optimizer is not None and param in optimizer.state \
+                        and 'mask' in optimizer.state[param]:
+                    m = optimizer.state[param]['mask']
+                if m is not None:
+                    # MASK-AWARE GC (high-sparsity fix): centralize over SURVIVING positions only.
+                    # The per-filter mean over ALL positions is dominated by the ~95% pruned entries,
+                    # so subtracting it injects a spurious offset into the surviving-weight gradients
+                    # (the Feb-2026 instability -> NaN blow-up). Compute the mean over kept weights,
+                    # then re-zero the pruned-position gradients so pruned weights never update.
+                    cnt = m.sum(dim=dims, keepdim=True).clamp_min(1.0)
+                    mean = (grad * m).sum(dim=dims, keepdim=True) / cnt
+                    grad.sub_(mean).mul_(m)
+                else:
+                    grad.sub_(grad.mean(dim=dims, keepdim=True))
 
 class InfiniteDataLoader(torch.utils.data.DataLoader):
     def __init__(self, *args, **kwargs):
@@ -1696,10 +1744,11 @@ def Prune_Score_v3(net, optimizer, epoch, imp_layer_names = None, prune_epochs =
                 else:
                     score = optimizer.state[param]['agg_score']
                 ## Turning off if module is not None and module.do_prune:
-                if module is not None:
+                if module is not None and not _protect_shortcut(name):
                     prune_mask, GVF = compute_mask(param, score, filter_based, bias_prune)
                     print_prune_mask = prune_mask.cpu().tolist()
                 else:
+                    # no module, or a protected shortcut: keep dense (all-ones mask)
                     prune_mask = torch.ones_like(param.data, requires_grad=False)
                     GVF = 1
                     print_prune_mask = [1] * param.numel()
@@ -1745,7 +1794,7 @@ def Prune_Score_Reset(net, optimizer, epoch, imp_layer_names = None, prune_epoch
                     score = torch.abs(param.data)
                 else:
                     score = optimizer.state[param]['agg_score']
-                if module is not None and module.do_prune:
+                if module is not None and module.do_prune and not _protect_shortcut(name):
                     prune_mask, GVF = compute_mask(param, score, filter_based, bias_prune)
                     print_prune_mask = prune_mask.cpu().tolist()
                 else:
@@ -2312,7 +2361,7 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
             l2_reg = sum(torch.norm(p) ** 2 for p in net.parameters())
             loss_iter = loss_iter + lambda_ * l2_reg
         loss_iter.backward()
-        apply_gradient_centralization(net)
+        apply_gradient_centralization(net, optimizer, post_prune=(mask and epoch > prune_epochs))
         with torch.no_grad():
             if mask and epoch>prune_epochs:
                     ## Go through all the parameters and set the pruned ones to zero
@@ -2415,6 +2464,8 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
                                 else:
                                     debug_logs.append(f"Layer Name: {name}\nGVF Value: {GVF[name]:.4f}\n")
 
+        if GRAD_CLIP_NORM is not None:
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=GRAD_CLIP_NORM)
         optimizer.step()
         optimizer.zero_grad()
         if epoch > prune_epochs and mask:
@@ -2523,9 +2574,10 @@ class ElementwiseMomentumSGD(Optimizer):
                         ## This will help us identify which weights to prune
                         decay_mask = torch.ones_like(WB, requires_grad=False)
                         decay_mask[sign_WB > 0] = 0
-                        if 'bn' not in self.name_map[param]:
+                        if 'bn' not in self.name_map[param] and not _protect_shortcut(self.name_map[param]):
                             mask_tensor, GVF_val = compute_mask(param, WB, self.filter_based, self.bias_prune)
                         else:
+                            # bn, or a protected shortcut: bypass Jenks -> all weights salient
                             mask_tensor = torch.ones_like(param.data, requires_grad=False)
                             GVF_val = 1
                         torch.cuda.empty_cache()

@@ -1,0 +1,126 @@
+
+15. Printing statistics.
+
+=== a_decode_hwcb ===
+
+   Number of wires:                 16
+   Number of wire bits:             27
+   Number of public wires:           8
+   Number of public wire bits:      19
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 16
+     AND2_X1                         1
+     AOI211_X1                       2
+     AOI21_X1                        2
+     AOI22_X1                        1
+     INV_X1                          2
+     NAND2_X1                        4
+     NOR2_X1                         4
+
+   Chip area for module '\a_decode_hwcb': 14.630000
+
+=== shift_add_mult ===
+
+   Number of wires:                529
+   Number of wire bits:            577
+   Number of public wires:          14
+   Number of public wire bits:      62
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                533
+     AND2_X1                        21
+     AND3_X1                         6
+     AND4_X1                         4
+     AOI211_X1                      13
+     AOI21_X1                       45
+     AOI221_X1                       2
+     AOI22_X1                       11
+     INV_X1                         14
+     MUX2_X1                         5
+     NAND2_X1                       90
+     NAND3_X1                       11
+     NAND4_X1                        4
+     NOR2_X1                        74
+     NOR3_X1                        23
+     OAI211_X1                      11
+     OAI21_X1                       52
+     OAI221_X1                       5
+     OAI22_X1                        4
+     OAI33_X1                        2
+     OR2_X1                         19
+     OR3_X1                         18
+     OR4_X1                          3
+     XNOR2_X1                       60
+     XOR2_X1                        34
+     a_decode_hwcb                   1
+     w_decode_e2m1                   1
+
+   Area for cell type \w_decode_e2m1 is unknown!
+   Area for cell type \a_decode_hwcb is unknown!
+
+   Chip area for module '\shift_add_mult': 594.776000
+
+=== w_decode_e2m1 ===
+
+   Number of wires:                 11
+   Number of wire bits:             24
+   Number of public wires:          10
+   Number of public wire bits:      23
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 10
+     BUF_X1                          1
+     INV_X1                          5
+     NOR2_X1                         1
+     OAI21_X1                        1
+     OR3_X1                          1
+     XNOR2_X1                        1
+
+   Chip area for module '\w_decode_e2m1': 8.246000
+
+=== design hierarchy ===
+
+   shift_add_mult                    1
+     a_decode_hwcb                   1
+     w_decode_e2m1                   1
+
+   Number of wires:                556
+   Number of wire bits:            628
+   Number of public wires:          32
+   Number of public wire bits:     104
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                557
+     AND2_X1                        22
+     AND3_X1                         6
+     AND4_X1                         4
+     AOI211_X1                      15
+     AOI21_X1                       47
+     AOI221_X1                       2
+     AOI22_X1                       12
+     BUF_X1                          1
+     INV_X1                         21
+     MUX2_X1                         5
+     NAND2_X1                       94
+     NAND3_X1                       11
+     NAND4_X1                        4
+     NOR2_X1                        79
+     NOR3_X1                        23
+     OAI211_X1                      11
+     OAI21_X1                       53
+     OAI221_X1                       5
+     OAI22_X1                        4
+     OAI33_X1                        2
+     OR2_X1                         19
+     OR3_X1                         19
+     OR4_X1                          3
+     XNOR2_X1                       61
+     XOR2_X1                        34
+
+   Chip area for top module '\shift_add_mult': 617.652000
+

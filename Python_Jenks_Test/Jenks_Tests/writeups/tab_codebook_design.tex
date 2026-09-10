@@ -1,0 +1,43 @@
+% ---------------------------------------------------------------------------
+% tab:codebook-design -- the novelty centerpiece, now over the full suite.
+% Columns: normalized-domain distortion (constrained_codebook.py, on N(0,1)),
+% mean WikiText-2 dPPL vs GF4 over 8 models / 3 families in the W4A4 regime
+% (codebook_suite.py), and decode-ROM area (Yosys/Nangate45). The solved-per-
+% model codebook is reported below the table (universality).
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Hardware-constrained distribution-aware codebook design. Each row is a
+  solution of Eq.~\eqref{eq:codebook-opt} under a different constraint; GF4 (the
+  continuous Gaussian-quantile codebook) and its naive rounding are shown for
+  reference. Solving the constrained problem exactly on the $1/16$ grid yields a
+  codebook with lower distortion and a smaller decode than hand-tuned GF4 at
+  iso-accuracy; the shift-and-add variant ($\operatorname{popcount}\le2$) gives
+  the smallest decode of all. $\Delta$PPL is the mean WikiText-2 perplexity gap
+  vs.\ GF4 over eight models spanning three families (OPT-125M$\to$13B,
+  Mistral-7B, Qwen2.5-7B/14B) in the deployed W4A4 regime (NVFP4 weights $+$
+  codebook activations); negative beats GF4. Distortion is the normalized-domain
+  MSE of Eq.~\eqref{eq:codebook-opt}; decode area is the \texttt{gf4\_decode\_fixed}
+  ROM (Yosys/Nangate45).}
+  \label{tab:codebook-design}
+  \small
+  \begin{tabular}{lcccr}
+    \toprule
+    Codebook (levels $\times 16$) & Distortion & $\overline{\Delta\text{PPL}}$ & Decode & Area \\
+                                  & ($\times10^{-3}$) & (suite) & ($\mu$m$^2$) & savings \\
+    \midrule
+    exact GF4 (float, Q1.7)                       & $1.516$ & $0$ (ref) & $15.16$ & --- \\
+    GF4 $\rightarrow$ Q1.4 (rounded) $\{0,1,3,5,6,8,11,16\}$ & $1.751$ & $+0.027$ & $9.04$ & $40\%$ \\
+    \midrule
+    \textbf{opt.\ Q1.4} $\{0,2,4,6,8,10,13,16\}$  & $\mathbf{1.454}$ & $-0.060$ & $7.18$ & $53\%$ \\
+    \textbf{opt.\ +popcount$\le 2$} $\{0,2,4,6,8,10,12,16\}$ & $1.466$ & $\mathbf{-0.088}$ & $\mathbf{5.85}$ & $\mathbf{61\%}$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.6ex}
+  {\footnotesize Solved independently on each model's own activations, the
+  shift-and-add optimum $\{0,2,4,6,8,10,12,16\}$ is \textbf{identical across all
+  eight models}; the unconstrained optimum agrees on seven, with Qwen2.5-7B
+  differing by a single grid step ($13\!\to\!12$). No per-layer or per-model
+  lookup table is stored.}
+\end{table}

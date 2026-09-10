@@ -1,0 +1,370 @@
+{
+  "model": "cv_densenet40",
+  "source": "dense",
+  "input_hw": 32,
+  "note": "conv/linear as GEMM: C=Cin*R*S, K=Cout, N=P*Q; density=1 (dense, GF4 precision study)",
+  "shapes": [
+    {
+      "name": "L0",
+      "K": 27,
+      "N": 24,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 663552
+    },
+    {
+      "name": "L1",
+      "K": 216,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2654208
+    },
+    {
+      "name": "L2",
+      "K": 324,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 3981312
+    },
+    {
+      "name": "L3",
+      "K": 432,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 5308416
+    },
+    {
+      "name": "L4",
+      "K": 540,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 6635520
+    },
+    {
+      "name": "L5",
+      "K": 648,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 7962624
+    },
+    {
+      "name": "L6",
+      "K": 756,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 9289728
+    },
+    {
+      "name": "L7",
+      "K": 864,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 10616832
+    },
+    {
+      "name": "L8",
+      "K": 972,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 11943936
+    },
+    {
+      "name": "L9",
+      "K": 1080,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 13271040
+    },
+    {
+      "name": "L10",
+      "K": 1188,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 14598144
+    },
+    {
+      "name": "L11",
+      "K": 1296,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 15925248
+    },
+    {
+      "name": "L12",
+      "K": 1404,
+      "N": 12,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 17252352
+    },
+    {
+      "name": "L13",
+      "K": 168,
+      "N": 168,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 28901376
+    },
+    {
+      "name": "L14",
+      "K": 1512,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 4644864
+    },
+    {
+      "name": "L15",
+      "K": 1620,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 4976640
+    },
+    {
+      "name": "L16",
+      "K": 1728,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 5308416
+    },
+    {
+      "name": "L17",
+      "K": 1836,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 5640192
+    },
+    {
+      "name": "L18",
+      "K": 1944,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 5971968
+    },
+    {
+      "name": "L19",
+      "K": 2052,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 6303744
+    },
+    {
+      "name": "L20",
+      "K": 2160,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 6635520
+    },
+    {
+      "name": "L21",
+      "K": 2268,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 6967296
+    },
+    {
+      "name": "L22",
+      "K": 2376,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 7299072
+    },
+    {
+      "name": "L23",
+      "K": 2484,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 7630848
+    },
+    {
+      "name": "L24",
+      "K": 2592,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 7962624
+    },
+    {
+      "name": "L25",
+      "K": 2700,
+      "N": 12,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 8294400
+    },
+    {
+      "name": "L26",
+      "K": 312,
+      "N": 312,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 24920064
+    },
+    {
+      "name": "L27",
+      "K": 2808,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2156544
+    },
+    {
+      "name": "L28",
+      "K": 2916,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2239488
+    },
+    {
+      "name": "L29",
+      "K": 3024,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2322432
+    },
+    {
+      "name": "L30",
+      "K": 3132,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2405376
+    },
+    {
+      "name": "L31",
+      "K": 3240,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2488320
+    },
+    {
+      "name": "L32",
+      "K": 3348,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2571264
+    },
+    {
+      "name": "L33",
+      "K": 3456,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2654208
+    },
+    {
+      "name": "L34",
+      "K": 3564,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2737152
+    },
+    {
+      "name": "L35",
+      "K": 3672,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2820096
+    },
+    {
+      "name": "L36",
+      "K": 3780,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2903040
+    },
+    {
+      "name": "L37",
+      "K": 3888,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2985984
+    },
+    {
+      "name": "L38",
+      "K": 3996,
+      "N": 12,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 3068928
+    },
+    {
+      "name": "L39",
+      "K": 456,
+      "N": 10,
+      "batchN": 1,
+      "count": 1,
+      "density": 1.0,
+      "macs": 4560
+    }
+  ],
+  "total_macs": 282917328,
+  "effective_macs_sparse": 282917328
+}

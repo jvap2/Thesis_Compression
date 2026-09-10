@@ -1,0 +1,14 @@
+problem:
+  version: 0.3
+  instance:
+    C: 1512
+    K: 12
+    N: 256
+    R: 1
+    S: 1
+    P: 1
+    Q: 1
+    densities:
+      Weights:
+        distribution: hypergeometric
+        density: 0.1376

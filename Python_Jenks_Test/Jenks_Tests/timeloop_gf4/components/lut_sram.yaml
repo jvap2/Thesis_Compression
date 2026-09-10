@@ -26,8 +26,8 @@ compound_components:
             read_bandwidth: 32
             write_bandwidth: 32
         - name: lut
-          class: regfile
-          attributes: { depth: 16, width: 8, datawidth: 8 }
+          class: regfile          # 8x8b symmetric magnitude codebook (sign applied at MAC)
+          attributes: { depth: 8, width: 8, datawidth: 8 }
       actions:
         - name: write              # FILL from DRAM: decode on chip ingress
           subcomponents:

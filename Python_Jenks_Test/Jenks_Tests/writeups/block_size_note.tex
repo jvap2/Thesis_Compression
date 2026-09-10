@@ -1,0 +1,22 @@
+% Drop-in for the experiments/setup of the codebook-design study. Explains and
+% justifies the block-32 configuration vs. the deployed block-16 + full-Hadamard
+% pipeline.
+\paragraph{Block size.} The deployed GF4 pipeline (Section~\ref{sec:sw-support})
+quantizes with a per-block scale over $16$ elements and rotates each layer by a
+full $\mathrm{next\_pow2}(d_{\mathrm{in}})$ randomized Hadamard. For the
+codebook-design study we instead fix a single block of $32$ with a block-diagonal
+Hadamard. This is deliberate. The codebook is optimized on the RMS-\emph{normalized}
+magnitude $m=\mathrm{clip}(|z|/\alpha,0,1)$ (Eq.~\ref{eq:codebook-opt}), where the
+per-block scale absorbs the dynamic range and only the \emph{shape} of the
+distribution enters the objective; that shape is approximately half-normal after
+any randomized Hadamard, essentially independent of the block width, so the solved
+levels are insensitive to the block granularity. Fixing block $32$ therefore
+removes block size as a confound while giving one controlled configuration across
+the eight-model, three-family suite, and keeps the per-model calibrate-and-solve
+inexpensive. The universality of the result is direct evidence of this
+insensitivity: the codebook solved independently on each model's own activations
+is the same $k/16$ lattice across all layers of a model and across models and
+families (Table~\ref{tab:codebook-suite}, Figure~\ref{fig:codebook-suite}), so the
+optimum does not track the block choice. We consequently report the study at
+block $32$ and deploy the identical codebook, unchanged, in the block-$16$
+pipeline.

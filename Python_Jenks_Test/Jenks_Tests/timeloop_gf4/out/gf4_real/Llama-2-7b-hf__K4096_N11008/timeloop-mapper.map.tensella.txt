@@ -1,0 +1,28 @@
+#error Tenssella does not support bypass.
+#error Tenssella does not support bypass.
+t4
+R 1 S 1 P 1 Q 1 C 8 K 64 N 2 
+KNC
+#error Tenssella does not support bypass.
+#error Tenssella does not support bypass.
+#error Tenssella does not support bypass.
+t3
+R 1 S 1 P 1 Q 1 C 16 K 43 N 16 
+NCK
+s3
+R 1 S 1 P 1 Q 1 C 4 K 4 N 4 
+NCK
+5
+#error Tenssella does not support bypass.
+#error Tenssella does not support bypass.
+t2
+R 1 S 1 P 1 Q 1 C 1 K 1 N 16 
+N
+#error Tenssella does not support bypass.
+#error Tenssella does not support bypass.
+t1
+R 1 S 1 P 1 Q 1 C 1 K 1 N 1 
+N
+t0
+R 1 S 1 P 1 Q 1 C 8 K 1 N 1 
+C

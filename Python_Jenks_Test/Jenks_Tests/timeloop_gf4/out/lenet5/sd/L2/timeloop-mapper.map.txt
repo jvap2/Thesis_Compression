@@ -1,0 +1,17 @@
+DRAM [ Weights:30096 (30096) Inputs:528 (528) Outputs:57 (57) ] 
+---------------------------------------------------------------
+| for C in [0:4)
+
+global_buffer [ ] 
+-----------------
+|   for C in [0:12)
+|     for C in [0:11) (Spatial-Y)
+
+weight_reg [ Inputs:1 (1) ] 
+---------------------------
+|       for K in [0:57)
+
+input_reg [ ] 
+psum_reg [ ] 
+------------
+|         << Compute >>

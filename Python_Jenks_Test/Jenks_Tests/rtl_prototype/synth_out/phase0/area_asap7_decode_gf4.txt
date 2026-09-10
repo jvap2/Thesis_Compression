@@ -1,0 +1,24 @@
+
+13. Printing statistics.
+
+=== gf4_decode_fixed ===
+
+   Number of wires:                 12
+   Number of wire bits:             21
+   Number of public wires:           4
+   Number of public wire bits:      13
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 16
+     AND2x2_ASAP7_75t_R              1
+     INVx1_ASAP7_75t_R               2
+     NAND2xp33_ASAP7_75t_R           3
+     NAND3xp33_ASAP7_75t_R           1
+     NOR2xp33_ASAP7_75t_R            5
+     OA21x2_ASAP7_75t_R              1
+     OAI21xp33_ASAP7_75t_R           2
+     XNOR2xp5_ASAP7_75t_R            1
+
+   Chip area for module '\gf4_decode_fixed': 1.093500
+

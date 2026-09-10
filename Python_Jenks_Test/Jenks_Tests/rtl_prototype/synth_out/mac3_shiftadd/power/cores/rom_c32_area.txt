@@ -1,0 +1,40 @@
+
+10. Printing statistics.
+
+=== rom_c32 ===
+
+   Number of wires:               1016
+   Number of wire bits:           1054
+   Number of public wires:           4
+   Number of public wire bits:      42
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:               1022
+     AND2_X1                        19
+     AND3_X1                        18
+     AND4_X1                        12
+     AOI211_X1                      14
+     AOI21_X1                       11
+     AOI221_X1                       4
+     AOI222_X1                      10
+     AOI22_X1                      146
+     INV_X1                         19
+     NAND2_X1                      108
+     NAND3_X1                       61
+     NAND4_X1                       54
+     NOR2_X1                       114
+     NOR3_X1                        95
+     NOR4_X1                        50
+     OAI211_X1                       3
+     OAI21_X1                       30
+     OAI221_X1                       4
+     OAI222_X1                      32
+     OAI22_X1                      121
+     OAI33_X1                       66
+     OR2_X1                          9
+     OR3_X1                         14
+     OR4_X1                          8
+
+   Chip area for module '\rom_c32': 1242.220000
+

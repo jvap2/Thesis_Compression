@@ -1,0 +1,41 @@
+% ---------------------------------------------------------------------------
+% tab:lut  --  GF4 codebook-decode (lookup-table) overhead, MULTIPLY-FREE.
+% Priced from real Timeloop access counts x 1 pJ/decode (Accelergy dummy
+% estimator, depth-independent).  The headline column is LUT-vs-memory: it
+% removes the MAC from BOTH numerator and denominator, so it is invariant to
+% the int4-vs-fp16 multiply modeling choice.  decode-per-MAC and
+% decode-at-ingress are the two placement extremes for context.  Area is the
+% codebook register-file's contribution to total array area.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{GF4 codebook-decode (lookup-table) overhead measured in
+  Timeloop/Accelergy (45\,nm, $256$-PE array). The \emph{multiply-free} column
+  prices the decode against the memory system with the MAC removed, so it does
+  not depend on how the multiplier is modeled. Decode-per-MAC and
+  decode-at-ingress bound the two placement extremes; the ingress cost is
+  near-free because the codebook fires once per DRAM load rather than once per
+  MAC. Codebook area is $+0.01\%$ of array area throughout.}
+  \label{tab:lut}
+  \small
+  \begin{tabular}{lrrr}
+    \toprule
+    & \multicolumn{3}{c}{LUT energy overhead vs.\ NVFP4 baseline} \\
+    \cmidrule(lr){2-4}
+    Model & Multiply-free & Decode/MAC & Decode/ingress \\
+    \midrule
+    \multicolumn{4}{l}{\textit{Language models (per token)}} \\
+    OPT-125M       & $15.71\%$ & $14.57\%$ & $1.08\%$ \\
+    OPT-1.3B       & $25.62\%$ & $22.71\%$ & $0.36\%$ \\
+    Llama-2-7B     & $23.75\%$ & $21.23\%$ & $0.68\%$ \\
+    \addlinespace
+    \multicolumn{4}{l}{\textit{CNNs (per inference)}} \\
+    DenseNet-40    & $10.65\%$ & $10.11\%$ & $1.37\%$ \\
+    LeNet-5        & $9.02\%$  & $8.63\%$  & $1.62\%$ \\
+    LeNet-300-100  & $3.47\%$  & $3.41\%$  & $1.92\%$ \\
+    ResNet-32      & $19.21\%$ & $17.53\%$ & $0.72\%$ \\
+    ResNet-56      & $19.33\%$ & $17.63\%$ & $0.71\%$ \\
+    VGG-19         & $18.18\%$ & $16.67\%$ & $1.15\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

@@ -23,6 +23,7 @@ OUT_DIR="synth_out/lutxlut_vs_decode_multiply"
 mkdir -p "$OUT_DIR"
 
 DEC_FIXED="$PHASE0_DIR/gf4_decode_fixed.v"
+DEC_E2M1="$PHASE0_DIR/e2m1_decode_fixed.v"
 DEC_PROG="$PHASE0_DIR/gf4_decode_programmable.v"
 DECMUL="$PHASE0_DIR/gf4_pe_decode_then_multiply.v"
 TB_DECMUL="$PHASE0_DIR/tb_gf4_pe_decode_then_multiply.v"
@@ -30,14 +31,14 @@ TB_DECMUL="$PHASE0_DIR/tb_gf4_pe_decode_then_multiply.v"
 TABLE="$PHASE1_DIR/gf4_joint_product_table.v"
 PELUT="$PHASE1_DIR/gf4_pe_lutxlut.v"
 
-for f in "$DEC_FIXED" "$DEC_PROG" "$DECMUL" "$TB_DECMUL" "$TABLE" "$PELUT"; do
+for f in "$DEC_FIXED" "$DEC_E2M1" "$DEC_PROG" "$DECMUL" "$TB_DECMUL" "$TABLE" "$PELUT"; do
   [ -f "$f" ] || { echo "Missing expected file: $f"; exit 1; }
 done
 command -v yosys >/dev/null 2>&1 || { echo "yosys not on PATH — source ~/eda/oss-cad-suite/environment first"; exit 1; }
 [ -f "$NANGATE_LIB" ] || { echo "Nangate45 liberty not found at $NANGATE_LIB"; exit 1; }
 
 echo "=== Functional sanity check: tb_gf4_pe_decode_then_multiply ==="
-iverilog -g2012 -o "$OUT_DIR/sim.vvp" "$DEC_FIXED" "$DEC_PROG" "$DECMUL" "$TB_DECMUL"
+iverilog -g2012 -o "$OUT_DIR/sim.vvp" "$DEC_FIXED" "$DEC_E2M1" "$DEC_PROG" "$DECMUL" "$TB_DECMUL"
 vvp "$OUT_DIR/sim.vvp" | tee "$OUT_DIR/sim.log"
 if ! grep -q "ALL CHECKS PASSED" "$OUT_DIR/sim.log"; then
   echo "tb_gf4_pe_decode_then_multiply did not report ALL CHECKS PASSED — stopping."

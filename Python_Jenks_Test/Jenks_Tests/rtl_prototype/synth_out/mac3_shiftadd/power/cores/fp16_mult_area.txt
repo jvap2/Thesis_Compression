@@ -1,0 +1,39 @@
+
+10. Printing statistics.
+
+=== fp16_mult ===
+
+   Number of wires:                687
+   Number of wire bits:            760
+   Number of public wires:           9
+   Number of public wire bits:      82
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                694
+     AND2_X1                        37
+     AND3_X1                        13
+     AND4_X1                        12
+     AOI211_X1                       2
+     AOI21_X1                       70
+     AOI22_X1                       17
+     INV_X1                         43
+     MUX2_X1                        12
+     NAND2_X1                       97
+     NAND3_X1                       23
+     NAND4_X1                        8
+     NOR2_X1                        81
+     NOR3_X1                        20
+     NOR4_X1                         1
+     OAI211_X1                       5
+     OAI21_X1                       42
+     OAI221_X1                       1
+     OAI22_X1                        2
+     OAI33_X1                        1
+     OR2_X1                         17
+     OR3_X1                         10
+     XNOR2_X1                       96
+     XOR2_X1                        84
+
+   Chip area for module '\fp16_mult': 796.670000
+

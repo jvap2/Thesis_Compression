@@ -1,0 +1,52 @@
+% ---------------------------------------------------------------------------
+% tab:node-scaling -- GF4 codebook-decode area as a fraction of the FP4 PE,
+% from real RTL synthesis (Yosys) against open standard-cell libraries at three
+% nodes. RTL companion to the Timeloop LUT study (tab:lut): it prices the ACTUAL
+% gf4_decode_fixed hardware, not the Accelergy dummy constant. Two panels, each
+% its own well-formed tabular: (a) node-invariance x datapath width; (b) 1/N
+% amortization when one decode is shared across a weight-stationary PE row.
+% Source: GF4_LUT_node_scaling.md, rtl_prototype/phase0_decode/.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{GF4 codebook-decode area as a fraction of the FP4 PE, synthesized
+  (Yosys) against open standard-cell libraries. \textbf{(a)} The hardwired
+  Gaussian-quantile decode is $\approx\!1.5\%$ of the PE and node-invariant, and
+  falls with datapath width (\texttt{OPERAND\_WIDTH}: 4 = narrow, 16 = W4A16).
+  \textbf{(b)} Shared across a weight-stationary row of $N$ MAC lanes, the same
+  decode amortizes as a clean $1/N$ (45\,nm, \texttt{OPERAND\_WIDTH}=8). At
+  45\,nm the absolute decode is $14.1\,\mu\text{m}^2$ / $14$\,fJ per op inside a
+  $963\,\mu\text{m}^2$ PE; energy tracks area for standard-cell logic at fixed
+  activity, so the decode is likewise $<\!1\%$ of PE energy at every node. The
+  regular E2M1 weight decode is smaller ($\approx\!0.6\%$), the $\approx\!0.9$\,pp
+  gap being the price of GF4's scattered-bit Gaussian constants.}
+  \label{tab:node-scaling}
+  \small
+
+  % --- (a) node-invariance x datapath width ---
+  \begin{tabular}{lccc}
+    \toprule
+    \multicolumn{4}{c}{(a) Decode / PE area vs.\ node and datapath width} \\
+    \midrule
+    & 130\,nm & 45\,nm & 7\,nm \\
+    \texttt{OPERAND\_WIDTH} & (SKY130) & (Nangate45) & (ASAP7) \\
+    \midrule
+    4 \quad (narrow)      & $2.34\%$ & $2.11\%$ & $2.25\%$ \\
+    8 \quad (W4A4-class)  & $1.61\%$ & $1.46\%$ & $1.57\%$ \\
+    16 \quad (W4A16)      & $1.10\%$ & $1.00\%$ & $1.05\%$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{1.5ex}
+
+  % --- (b) 1/N amortization across a PE row ---
+  \begin{tabular}{lccccc}
+    \toprule
+    \multicolumn{6}{c}{(b) Shared decode / row, $N$ lanes (45\,nm, W=8)} \\
+    \midrule
+    $N$ lanes/row  & 1 & 2 & 4 & 8 & 16 \\
+    \midrule
+    decode / row   & $1.46\%$ & $0.73\%$ & $0.37\%$ & $0.19\%$ & $0.10\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

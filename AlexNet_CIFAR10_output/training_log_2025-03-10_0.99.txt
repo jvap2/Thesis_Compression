@@ -1,2 +1,0 @@
-Iteration: 1| Loss:  48.01767| Acc:  0.06250 | L_2:  1.00000
-Iteration: 1| Loss:  47.99966| Acc:  0.10000 | L_2:  1.00000

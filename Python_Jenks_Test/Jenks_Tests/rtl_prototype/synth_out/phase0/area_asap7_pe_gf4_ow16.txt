@@ -1,0 +1,136 @@
+
+15. Printing statistics.
+
+=== gf4_decode_fixed ===
+
+   Number of wires:                 13
+   Number of wire bits:             22
+   Number of public wires:           4
+   Number of public wire bits:      13
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 17
+     AOI21xp33_ASAP7_75t_R           3
+     INVx1_ASAP7_75t_R               3
+     NAND2xp33_ASAP7_75t_R           3
+     NAND3xp33_ASAP7_75t_R           2
+     NOR2xp33_ASAP7_75t_R            2
+     OAI21xp33_ASAP7_75t_R           4
+
+   Chip area for module '\gf4_decode_fixed': 1.078920
+
+=== gf4_pe ===
+
+   Number of wires:                967
+   Number of wire bits:           1096
+   Number of public wires:          15
+   Number of public wire bits:     113
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:               1016
+     A2O1A1Ixp33_ASAP7_75t_R         9
+     A2O1A1O1Ixp25_ASAP7_75t_R       4
+     AND2x2_ASAP7_75t_R             26
+     AND3x1_ASAP7_75t_R             20
+     AND4x1_ASAP7_75t_R              1
+     AND5x1_ASAP7_75t_R              1
+     AO21x1_ASAP7_75t_R             31
+     AO22x1_ASAP7_75t_R              1
+     AO32x1_ASAP7_75t_R              2
+     AOI211xp5_ASAP7_75t_R          27
+     AOI21xp33_ASAP7_75t_R          39
+     AOI221xp5_ASAP7_75t_R           3
+     AOI22xp33_ASAP7_75t_R           7
+     AOI31xp33_ASAP7_75t_R           5
+     AOI32xp33_ASAP7_75t_R           3
+     DFFASRHQNx1_ASAP7_75t_R        32
+     INVx1_ASAP7_75t_R              75
+     MAJIxp5_ASAP7_75t_R            61
+     MAJx2_ASAP7_75t_R              22
+     NAND2xp33_ASAP7_75t_R         140
+     NAND3xp33_ASAP7_75t_R          21
+     NAND4xp25_ASAP7_75t_R           3
+     NOR2xp33_ASAP7_75t_R           82
+     NOR3xp33_ASAP7_75t_R           12
+     NOR4xp25_ASAP7_75t_R            1
+     NOR5xp2_ASAP7_75t_R             1
+     O2A1O1Ixp33_ASAP7_75t_R        11
+     OA211x2_ASAP7_75t_R             3
+     OA21x2_ASAP7_75t_R             10
+     OAI211xp5_ASAP7_75t_R           4
+     OAI21xp33_ASAP7_75t_R          31
+     OAI22xp33_ASAP7_75t_R           2
+     OAI311xp33_ASAP7_75t_R          1
+     OAI31xp33_ASAP7_75t_R           3
+     OAI32xp33_ASAP7_75t_R           2
+     OR2x2_ASAP7_75t_R              23
+     OR3x1_ASAP7_75t_R              16
+     OR4x1_ASAP7_75t_R               1
+     OR5x1_ASAP7_75t_R               1
+     XNOR2xp5_ASAP7_75t_R          201
+     XOR2xp5_ASAP7_75t_R            77
+     gf4_decode_fixed                1
+
+   Area for cell type \gf4_decode_fixed is unknown!
+
+   Chip area for module '\gf4_pe': 101.622600
+
+=== design hierarchy ===
+
+   gf4_pe                            1
+     gf4_decode_fixed                1
+
+   Number of wires:                980
+   Number of wire bits:           1118
+   Number of public wires:          19
+   Number of public wire bits:     126
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:               1032
+     A2O1A1Ixp33_ASAP7_75t_R         9
+     A2O1A1O1Ixp25_ASAP7_75t_R       4
+     AND2x2_ASAP7_75t_R             26
+     AND3x1_ASAP7_75t_R             20
+     AND4x1_ASAP7_75t_R              1
+     AND5x1_ASAP7_75t_R              1
+     AO21x1_ASAP7_75t_R             31
+     AO22x1_ASAP7_75t_R              1
+     AO32x1_ASAP7_75t_R              2
+     AOI211xp5_ASAP7_75t_R          27
+     AOI21xp33_ASAP7_75t_R          42
+     AOI221xp5_ASAP7_75t_R           3
+     AOI22xp33_ASAP7_75t_R           7
+     AOI31xp33_ASAP7_75t_R           5
+     AOI32xp33_ASAP7_75t_R           3
+     DFFASRHQNx1_ASAP7_75t_R        32
+     INVx1_ASAP7_75t_R              78
+     MAJIxp5_ASAP7_75t_R            61
+     MAJx2_ASAP7_75t_R              22
+     NAND2xp33_ASAP7_75t_R         143
+     NAND3xp33_ASAP7_75t_R          23
+     NAND4xp25_ASAP7_75t_R           3
+     NOR2xp33_ASAP7_75t_R           84
+     NOR3xp33_ASAP7_75t_R           12
+     NOR4xp25_ASAP7_75t_R            1
+     NOR5xp2_ASAP7_75t_R             1
+     O2A1O1Ixp33_ASAP7_75t_R        11
+     OA211x2_ASAP7_75t_R             3
+     OA21x2_ASAP7_75t_R             10
+     OAI211xp5_ASAP7_75t_R           4
+     OAI21xp33_ASAP7_75t_R          35
+     OAI22xp33_ASAP7_75t_R           2
+     OAI311xp33_ASAP7_75t_R          1
+     OAI31xp33_ASAP7_75t_R           3
+     OAI32xp33_ASAP7_75t_R           2
+     OR2x2_ASAP7_75t_R              23
+     OR3x1_ASAP7_75t_R              16
+     OR4x1_ASAP7_75t_R               1
+     OR5x1_ASAP7_75t_R               1
+     XNOR2xp5_ASAP7_75t_R          201
+     XOR2xp5_ASAP7_75t_R            77
+
+   Chip area for top module '\gf4_pe': 102.701520
+

@@ -1,0 +1,47 @@
+% ===========================================================================
+% CUDA Inferencing Support -- shortened, and tees off into the
+% Hardware-Constrained Codebook Design section that follows. Cuts the datapath
+% algebra (now in sec:Proposed) and the per-kernel detail; keeps the deployment
+% argument, the centerpiece measurement, and adds a closing hand-off.
+% ===========================================================================
+\section{CUDA Inferencing Support}\label{sec:sw-support}
+
+Distribution-matched 4-bit codebooks such as GF4 and NF4~\cite{dettmers2023qlora}
+are not hardware-native on the FP4 tensor cores of Blackwell GPUs: each 4-bit code
+is decoded by a small table lookup to the GPU's native precision (fp16) before the
+matmul. We argue this is a deployment \emph{advantage}. GF4's benefit is dominated
+by 4-bit operand traffic and on-chip capacity, not multiplier width, so it runs on
+\emph{any} already-deployed GPU through software decode, with no dependence on
+Blackwell-class FP4 cores. On a pre-Blackwell GPU NVFP4 and GF4 take the identical
+decode-to-fp16 path --- the multiplier is the same and only the decoded magnitudes
+differ --- so GF4 is a strictly-better, same-cost codebook there. ``W4A4''
+therefore denotes 4-bit storage and transfer, not a 4-bit multiplier: the savings
+come from $\sim$3.6$\times$ narrower operand traffic ($\approx$4.5\,bits/value with
+the per-block scale), not a narrower arithmetic unit.
+
+We realize this datapath as custom CUDA kernels on an RTX 4080 and \emph{measure}
+them --- these are real fused kernels computing the same result as the
+fake-quantization protocol, not a simulation, each benchmarked against an unfused
+baseline. The centerpiece fuses the 4-bit weight decode directly into the GEMV's
+register-level tile load, so the reconstructed fp16 weight matrix never touches
+DRAM: Nsight Compute measures a $4.0$--$6.3\times$ reduction in weight HBM traffic
+(growing with matrix size) for a $1.5$--$2.9\times$ wall-clock speedup over a naive
+dequantize-then-matmul baseline, and it eliminates that baseline's transient-memory
+blowup, which peaks near $30\times$ the packed weight's size ($2.5$\,GB for an
+$83$\,MB matrix). Supporting kernels fuse the Walsh--Hadamard rotation
+($\mathcal{O}(N\log N)$; up to $6.4\times$ at $N{=}16384$) and the per-block
+RMS/quantize/pack pass ($1.3$--$1.5\times$). With the RTL decode unit of
+Section~\ref{sec:Proposed}, these confirm the decode-then-multiply-in-registers
+datapath is numerically equivalent to fake quantization while removing the
+bandwidth and capacity its reconstruction step would otherwise impose at inference
+time.
+
+One cost survives all of these realizations, and it is common to \emph{any}
+distribution-matched codebook: the decode is a lookup of \emph{arbitrary}
+magnitudes --- a constant-memory read that serializes on divergent codes on the
+GPU, and the entire decode ROM on the ASIC. It is the last place a codebook is
+charged for the irregularity of its levels. The next section asks whether that
+charge can be removed: can the codebook be constrained to a hardware-representable
+lattice --- so the decode becomes table-free and shift-decodable --- \emph{without}
+surrendering the accuracy that motivated a distribution-matched codebook in the
+first place?

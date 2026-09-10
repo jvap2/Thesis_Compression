@@ -1,0 +1,6 @@
+signal,gf4_snr_db,nvfp4_snr_db,gf4_rel_rms_pct,nvfp4_rel_rms_pct,gf4_rel_mae_pct,nvfp4_rel_mae_pct,d_snr_db,d_rel_rms_pct
+"Synthetic N(0,1)",19.86,19.16,10.161,11.019,9.856,10.269,0.7,0.857
+Gaussian + outlier ch.,11.42,11.37,26.865,26.995,12.833,13.115,0.04,0.13
+VGG-19 (CIFAR-10) weights,19.44,18.81,10.672,11.468,10.348,10.719,0.62,0.796
+ResNet-32 (CIFAR-100) weights,18.91,18.41,11.336,12.005,9.872,10.273,0.5,0.669
+ResNet-56 (CIFAR-100) weights,19.05,18.5,11.154,11.883,9.823,10.264,0.55,0.729

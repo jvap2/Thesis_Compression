@@ -316,6 +316,30 @@ def quantize_activations_gf4_residual(
     return (x_q1 + x_q2).to(x.dtype)
 
 
+def quantize_activations_gf4_npass(
+    x, block_size, n_pass=4, clip_ratio=2.5, levels=None,
+):
+    """
+    N-stage residual GF4 activation quantization (generalizes the 2-stage
+    quantize_activations_gf4_residual to an arbitrary pass count).
+
+    q = 0
+    repeat n_pass times:  q += GF4(x - q, clip_ratio)
+
+    Each pass re-quantizes the leftover residual; the residual of GF4-quantized
+    Gaussian activations stays approximately Gaussian, so GF4 remains near-optimal
+    every stage. Net effective resolution grows ~1 extra bit / pass at n_pass×
+    activation compute. n_pass=2 reproduces quantize_activations_gf4_residual.
+    Used to test whether extra GF4 passes on the outlier-heavy layers can stand in
+    for FP16 retention (down_proj / fc2).
+    """
+    x_f = x.float()
+    q   = torch.zeros_like(x_f)
+    for _ in range(n_pass):
+        q = q + quantize_activations_gf4(x_f - q, block_size, clip_ratio=clip_ratio, levels=levels)
+    return q.to(x.dtype)
+
+
 
 def quantize_activations_gf4(x, block_size, clip_ratio=2.5, levels=None):
     """
@@ -8323,7 +8347,7 @@ class QuantConv2dFP(nn.Module):
             self.m_bits_scale,
             device=device,
         )
-        self.weight_q = res["weight_q"].view_as(self.linear.weight)
+        self.weight_q = res["weight_q"].view_as(self.conv.weight)
         self.alpha_q  = res["alpha"]   # [N, n_blocks] CPU float32
         self.bias_q   = res["bias"]    # [N, n_blocks] CPU long
  
@@ -8354,6 +8378,13 @@ class QuantConv2dFP(nn.Module):
             self.weight_q = res['reconstructed_weight'].view_as(self.conv.weight)
     def _quantize_input(self, x):
         bs = self.act_block_size or self.block_size
+        mode = getattr(self, "act_quant_mode", None)
+        lvl  = getattr(self, "gf4_levels", None)
+        if mode == "gf4_adaptive":                         # GF4-adaptive activations (was Linear-only)
+            return quantize_activations_gf4_adaptive(x, bs, levels=lvl)
+        if mode == "gf4":
+            clip = getattr(self, "act_clip_ratio", None) or 2.5
+            return quantize_activations_gf4(x, bs, clip_ratio=clip, levels=lvl)
         return quantize_activations(
             x, bs, self.e_bits, self.m_bits,
             self.e_bits_scale, self.m_bits_scale
@@ -8518,7 +8549,7 @@ class QuantConv1dFP(nn.Module):
             self.m_bits_scale,
             device=device,
         )
-        self.weight_q = res["weight_q"].view_as(self.linear.weight)
+        self.weight_q = res["weight_q"].view_as(self.conv1d.weight)
         self.alpha_q  = res["alpha"]   # [N, n_blocks] CPU float32
         self.bias_q   = res["bias"]    # [N, n_blocks] CPU long
  
@@ -10107,6 +10138,20 @@ class HadamardQuantLinearFP(nn.Module):
                     clip = self.act_clip_ratio if self.act_clip_ratio is not None else 2.5
                     x_2d = quantize_activations_gf4_residual(
                         x_2d, bs, clip_ratio1=clip, clip_ratio2=clip, levels=lvl
+                    ).to(orig_dtype)
+
+                elif self._act_quant_mode == "gf4_residual4":
+                    clip = self.act_clip_ratio if self.act_clip_ratio is not None else 2.5
+                    x_2d = quantize_activations_gf4_npass(
+                        x_2d, bs, n_pass=4, clip_ratio=clip, levels=lvl
+                    ).to(orig_dtype)
+
+                elif self._act_quant_mode == "gf4_residualN":
+                    # arbitrary N-pass residual GF4; N read from module.gf4_npass (default 4)
+                    clip = self.act_clip_ratio if self.act_clip_ratio is not None else 2.5
+                    x_2d = quantize_activations_gf4_npass(
+                        x_2d, bs, n_pass=getattr(self, "gf4_npass", 4),
+                        clip_ratio=clip, levels=lvl
                     ).to(orig_dtype)
 
                 else:
@@ -13608,6 +13653,11 @@ def quantize_model_fp(model,
         return model
     for name, module in model.named_modules():
         if hasattr(module, 'weight_q') and module.weight_q is not None:
+            # This orig-vs-quant check is Linear-only; conv wrappers store
+            # self.conv (not self.linear), so skip them and check the first Linear.
+            if not (hasattr(module, 'linear') or hasattr(module, 'inner')
+                    or type(module).__name__ == "QuantLinearFP_Decomposed"):
+                continue
             # Decomposed modules use normal_indices for the FP4 weight
             if type(module).__name__ == "QuantLinearFP_Decomposed":
                 in_f  = module.normal_indices.shape[0]

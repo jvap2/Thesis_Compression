@@ -917,6 +917,12 @@ try:
     # Two-stage residual GF4 (2× effective resolution)
     ppl_fp4_residual, ppl_fp4_residual_gptq = _safe_eval("gf4_residual")
 
+    # Four-stage residual GF4 (4× activation compute) — does a deeper pass ladder
+    # buy anything over 2-pass, and can it stand in for FP16 outlier retention?
+    ppl_fp4_residual4, ppl_fp4_residual4_gptq = _safe_eval("gf4_residual4")
+    print(f"\n[PASS LADDER] A16={ppl_fp4_a16:.3f}  gf4(1)={ppl_fp4_gf4:.3f}  "
+          f"residual(2)={ppl_fp4_residual:.3f}  residual4(4)={ppl_fp4_residual4:.3f}")
+
     # Learned GF4 codebook + H-SmoothQuant — FULL_SWEEP only.  The learned-levels
     # 400-step calibration and the h-smooth recalibration are both too slow for
     # a T4 budget and are not the headline result.

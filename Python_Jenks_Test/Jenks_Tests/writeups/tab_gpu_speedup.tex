@@ -1,0 +1,34 @@
+% ---------------------------------------------------------------------------
+% tab:gpu-speedup -- measured GPU speedup, RTX 4080, single-token W4A16 GEMV,
+% cold-L2 (weights streamed from HBM, the real large-model regime). Two wins
+% compose: (i) the 4-bit weight-traffic reduction shared by any 4-bit format
+% (GF4 vs dense fp16), and (ii) the codebook-specific table-free decode of the
+% constrained-optimal lattice codebook (opt vs GF4). Source: CUDA_FP4_Test/
+% bench.py section 6, gf4_fused_gemv_kernel.cu (LUT vs lattice decode).
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Measured GPU speedup of the fused W4A16 GEMV on an RTX 4080 (cold-L2,
+  weights streamed from HBM). \textbf{dense fp16} is the deployed baseline;
+  \textbf{GF4 (LUT)} decodes the arbitrary Gaussian codebook from a constant-memory
+  lookup; \textbf{opt (lattice)} decodes the constrained-optimal codebook
+  $\{0,2,4,6,8,10,12,16\}/16$ by shift-and-add ($k=2\,\mathrm{idx}$), touching no
+  table. Two effects compose: the $3.6\times$ weight-traffic reduction (GF4 vs.\
+  dense, shared by any 4-bit format) and the table-free decode (opt vs.\ GF4),
+  for a net $2.6$--$3.1\times$ over dense fp16. The decode win is larger warm
+  ($\approx3\times$ opt vs.\ GF4), where memory is cheap and the serialized
+  divergent LUT read dominates.}
+  \label{tab:gpu-speedup}
+  \small
+  \begin{tabular}{lrrrccc}
+    \toprule
+    Layer & dense fp16 & GF4 (LUT) & opt (lattice) & \multicolumn{3}{c}{speedup} \\
+    \cmidrule(lr){5-7}
+    $M\times K$ & ($\mu$s) & ($\mu$s) & ($\mu$s) & GF4/dense & \textbf{opt/dense} & opt/GF4 \\
+    \midrule
+    $4096\times4096$    & $82.6$  & $50.6$  & $31.5$  & $1.64\times$ & $\mathbf{2.62\times}$ & $1.60\times$ \\
+    $11008\times4096$   & $197.9$ & $116.2$ & $63.0$  & $1.70\times$ & $\mathbf{3.14\times}$ & $1.85\times$ \\
+    $11008\times11008$  & $457.2$ & $301.7$ & $156.3$ & $1.52\times$ & $\mathbf{2.93\times}$ & $1.93\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

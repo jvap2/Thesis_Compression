@@ -1,0 +1,8 @@
+read_verilog -sv "/home/jvap2/Desktop/Code/TIME_ML/Python_Jenks_Test/Jenks_Tests/rtl_prototype/synth_out/regularity/decode_pow2.v"
+hierarchy -top gf4_decode_fixed
+proc; opt; fsm; opt; memory; opt
+techmap; opt
+dfflibmap -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+abc -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+clean
+tee -o /home/jvap2/Desktop/Code/TIME_ML/Python_Jenks_Test/Jenks_Tests/rtl_prototype/synth_out/regularity/area_pow2.txt stat -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"

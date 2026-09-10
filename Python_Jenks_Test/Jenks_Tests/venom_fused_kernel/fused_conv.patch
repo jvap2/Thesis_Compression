@@ -1,0 +1,183 @@
+diff --git a/end2end/setup.py b/end2end/setup.py
+index 24cb9c7..155dce8 100644
+--- a/end2end/setup.py
++++ b/end2end/setup.py
+@@ -12,7 +12,7 @@ setup(
+     ext_modules=[
+             CUDAExtension('spatha',
+                               ['spatha_mod/block_sparse/api/spatha.cu'],
+-                              extra_compile_args={'cxx':[], 'nvcc':['-arch=sm_86', '--ptxas-options=-v', '-lineinfo']})
++                              extra_compile_args={'cxx':[], 'nvcc':['-arch=sm_89', '--ptxas-options=-v', '-lineinfo']})
+                   ],
+     cmdclass={'build_ext': BuildExtension},
+     install_requires=['torch']
+diff --git a/end2end/spatha_mod/block_sparse/api/spatha.cu b/end2end/spatha_mod/block_sparse/api/spatha.cu
+index 8fa2463..aa328df 100644
+--- a/end2end/spatha_mod/block_sparse/api/spatha.cu
++++ b/end2end/spatha_mod/block_sparse/api/spatha.cu
+@@ -19,6 +19,7 @@
+ #include "../spmm/blockwise_library.cu"
+ 
+ #include <torch/extension.h>
++namespace py = pybind11;
+ 
+ using namespace spatha;
+ 
+@@ -52,14 +53,16 @@ torch::Tensor spmm(torch::Tensor A_metadata,
+                         int nnz,
+                         int seed,
+                         int mbrow,
+-                        int brow)
++                        int brow,
++                        int L_conv, int cOW=0, int cC=0, int cKW=0, int cKHKW=0, int cHp=0, int cWp=0, torch::Tensor col_off=torch::Tensor())
+ {
+     return spmm_cuda(A_metadata, A_indices, A_values, rhs_matrix, bias,
+                         A_num_rows, A_num_cols, B_num_cols,
+                         vec_length, n, m, nnz,
+-                        seed, mbrow, brow);
++                        seed, mbrow, brow, L_conv, cOW, cC, cKW, cKHKW, cHp, cWp,
++                        col_off.numel()>0 ? col_off.data_ptr<int>() : nullptr);
+ }
+ 
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m){
+-    m.def("spmm",  &spmm,  "Custom SPMM kernel");
++    m.def("spmm",  &spmm,  "Custom SPMM kernel", py::arg("A_metadata"),py::arg("A_indices"),py::arg("A_values"),py::arg("rhs_matrix"),py::arg("bias"),py::arg("A_num_rows"),py::arg("A_num_cols"),py::arg("B_num_cols"),py::arg("vec_length"),py::arg("n"),py::arg("m"),py::arg("nnz"),py::arg("seed"),py::arg("mbrow"),py::arg("brow"),py::arg("L_conv")=0,py::arg("cOW")=0,py::arg("cC")=0,py::arg("cKW")=0,py::arg("cKHKW")=0,py::arg("cHp")=0,py::arg("cWp")=0,py::arg("col_off")=torch::Tensor());
+ }
+\ No newline at end of file
+diff --git a/end2end/spatha_mod/block_sparse/spmm/blockwise_kernel.h b/end2end/spatha_mod/block_sparse/spmm/blockwise_kernel.h
+index a21da2a..e915123 100644
+--- a/end2end/spatha_mod/block_sparse/spmm/blockwise_kernel.h
++++ b/end2end/spatha_mod/block_sparse/spmm/blockwise_kernel.h
+@@ -102,7 +102,7 @@ struct SpmmBlockwiseKernel {
+     void mainLoop(const int M, const int N, const int K,
+         const int n, const int m, const int brow, const int mbrow,
+         const unsigned int *A_metadata,
+-        const half *A_values, const uint* A_indices, const half *B, half *shared_mem_workspace, float alpha, half *C, float beta, half *D);
++        const half *A_values, const uint* A_indices, const half *B, half *shared_mem_workspace, float alpha, half *C, float beta, half *D, const int L_conv, const int cOW, const int cC, const int cKW, const int cKHKW, const int cHp, const int cWp, const int* col_off);
+ 
+     __device__ __forceinline__
+     void epilogue(const int M, const int N,
+@@ -130,7 +130,7 @@ void SpmmBlockwiseKernel<BM, BK, ThreadBlockShape, WarpShape, MmaShape,
+ (const int M, const int N, const int K,
+     const int nn, const int mm, const int brow, const int mbrow,
+     const unsigned int *A_metadata,
+-    const half *A_values, const uint *A_indices, const half *B, half *shared_mem_workspace, float alpha, half *C, float beta, half *D)
++    const half *A_values, const uint *A_indices, const half *B, half *shared_mem_workspace, float alpha, half *C, float beta, half *D, const int L_conv, const int cOW, const int cC, const int cKW, const int cKHKW, const int cHp, const int cWp, const int* col_off)
+ {
+     const int warp_id = (threadIdx.x >> 5);
+     const int lane = threadIdx.x & 31;
+@@ -256,10 +256,24 @@ void SpmmBlockwiseKernel<BM, BK, ThreadBlockShape, WarpShape, MmaShape,
+                     int k = (nz_block_idx/4)*mm + fetch*8*mm + k_base;
+                     bool zfill = (k>K);
+ 
+-                    const half *src = B_panel + k * N + (idx % block_N);
+-                          half *dst = shared_tile_B + bSwizzle(idx);
+-
+-                    my_pipeline::cp_async_pred_zfill<16>(dst, src, true, zfill);
++                    half *dst = shared_tile_B + bSwizzle(idx);
++                    if (L_conv > 0) {                 // fused conv: B is (pre-padded) activation [batch,cC,cHp,cWp]
++                        int n_g0 = idx_block_N*block_N + (idx % block_N);
++                        int cc   = k / cKHKW;
++                        int rr   = k - cc*cKHKW;
++                        int ki   = rr / cKW;
++                        int kj   = rr - ki*cKW;
++                        int kpart = cc*(cHp*cWp) + ki*cWp + kj;   // k-dependent offset (once/thread)
++                        #pragma unroll
++                        for (int j = 0; j < 8; j++) {
++                            int n_g = n_g0 + j;
++                            dst[j] = (zfill || n_g >= N) ? __float2half(0.f)
++                                                         : B[col_off[n_g] + kpart];  // no divisions
++                        }
++                    } else {
++                        const half *src = B_panel + k * N + (idx % block_N);
++                        my_pipeline::cp_async_pred_zfill<16>(dst, src, true, zfill);
++                    }
+                 }
+ 
+             }
+diff --git a/end2end/spatha_mod/block_sparse/spmm/blockwise_library.cu b/end2end/spatha_mod/block_sparse/spmm/blockwise_library.cu
+index 5ac69da..8205c2a 100755
+--- a/end2end/spatha_mod/block_sparse/spmm/blockwise_library.cu
++++ b/end2end/spatha_mod/block_sparse/spmm/blockwise_library.cu
+@@ -305,14 +305,21 @@ torch::Tensor spmm_cuda(torch::Tensor A_metadata,
+                         int nnz,
+                         int seed,
+                         int mbrow,
+-                        int brow)
++                        int brow,
++                        int L_conv, int cOW, int cC, int cKW, int cKHKW, int cHp, int cWp, const int* col_off)
+ {
+     //std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+     auto options = torch::TensorOptions().dtype(torch::kFloat16).device(rhs_matrix.device());
+ 
+     auto output_matrix = torch::empty({B_num_cols,A_num_rows}, options);
+ 
+-#ifdef V_64
++#ifdef V_32
++    SpmmBlockwiseOp<ShapeBase<32, 64, 32>,  // block tile (V=32, 1 warp - occupancy-bound but no M-pad)
++                ShapeBase<32, 64, 32>,       // warp tile
++                ShapeBase<16, 8, 32>,        // mma shape
++                2>                           // number of pipeline stage
++                op;
++#elif defined(V_64)
+     SpmmBlockwiseOp<ShapeBase<64, 64, 32>,  // block tile
+                 ShapeBase<32, 64, 32>,       // warp tile
+                 ShapeBase<16, 8, 32>,        // mma shape
+@@ -339,7 +346,7 @@ torch::Tensor spmm_cuda(torch::Tensor A_metadata,
+                   1.0f,
+                   reinterpret_cast<half *>(output_matrix.data_ptr<torch::Half>()),
+                   0.0f, m, n, brow, mbrow,
+-                  reinterpret_cast<half *>(bias.data_ptr<torch::Half>()));
++                  reinterpret_cast<half *>(bias.data_ptr<torch::Half>()), L_conv, cOW, cC, cKW, cKHKW, cHp, cWp, col_off);
+ 
+     op();
+     //cudaDeviceSynchronize();
+diff --git a/end2end/spatha_mod/block_sparse/spmm/blockwise_op.h b/end2end/spatha_mod/block_sparse/spmm/blockwise_op.h
+index 55381a9..f15f48a 100755
+--- a/end2end/spatha_mod/block_sparse/spmm/blockwise_op.h
++++ b/end2end/spatha_mod/block_sparse/spmm/blockwise_op.h
+@@ -32,6 +32,9 @@ struct SpmmBlockwiseOpState {
+         uint  *A_metadata;
+         uint  *A_indices;
+         float alpha, beta;
++        int L_conv;
++        int cOW, cC, cKW, cKHKW, cHp, cWp;
++        const int* col_off;
+     } args;
+ };
+ 
+@@ -58,7 +61,7 @@ public:
+                         ASwizzle, BSwizzle, CSwizzle>;
+ 
+ 
+-    void initialize(int M, int K, half *A, uint *metadata, uint *indices, int N, half *B, float alpha, half *C, float beta, int m_row, int n_row, int brow, int mbrow, half *D);
++    void initialize(int M, int K, half *A, uint *metadata, uint *indices, int N, half *B, float alpha, half *C, float beta, int m_row, int n_row, int brow, int mbrow, half *D, int L_conv, int cOW, int cC, int cKW, int cKHKW, int cHp, int cWp, const int* col_off);
+ 
+     void operator()(cudaStream_t stream = NULL);
+ 
+@@ -72,7 +75,7 @@ void _spmmBlockwiseKernel(typename SpmmBlockwiseOpState::Argument_t args)
+     extern __shared__ half shared_mem_workspace[];
+     KernelImpl k;
+ 
+-    k.mainLoop(args.M, args.N, args.K, args.nn, args.mm, args.brow, args.mbrow, args.A_metadata, args.A_values, args.A_indices, args.B, shared_mem_workspace, 1.0f, args.C, 1.0f, args.D);
++    k.mainLoop(args.M, args.N, args.K, args.nn, args.mm, args.brow, args.mbrow, args.A_metadata, args.A_values, args.A_indices, args.B, shared_mem_workspace, 1.0f, args.C, 1.0f, args.D, args.L_conv, args.cOW, args.cC, args.cKW, args.cKHKW, args.cHp, args.cWp, args.col_off);
+ 
+     //k.epilogue(args.M, args.N, shared_mem_workspace, args.alpha, args.C, args.beta, args.D);
+ }
+@@ -86,14 +89,14 @@ template<
+     int NStage
+ >
+ void SpmmBlockwiseOp<ThreadBlockShape, WarpShape, MmaShape, NStage>::initialize(
+-    int M, int K, half *A, uint *metadata, uint *indices, int N, half *B, float alpha, half *C, float beta, int m_row, int n_row, int brow, int mbrow, half *D)
++    int M, int K, half *A, uint *metadata, uint *indices, int N, half *B, float alpha, half *C, float beta, int m_row, int n_row, int brow, int mbrow, half *D, int L_conv, int cOW, int cC, int cKW, int cKHKW, int cHp, int cWp, const int* col_off)
+ {
+     this->_state.args = SpmmBlockwiseOpState::Argument_t({M, N, K,
+         n_row, m_row, brow, mbrow,
+         A, B, C, D,
+         metadata,
+         indices,
+-        1.0, beta});
++        1.0, beta, L_conv, cOW, cC, cKW, cKHKW, cHp, cWp, col_off});
+ 
+     // compute shared memory buffer size
+     size_t input_buffer_size_dyn = 0;

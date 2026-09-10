@@ -1,0 +1,14 @@
+ERT:
+    version: '0.4'
+    tables:
+      - name: NVFP4_Engine.chip.PE[0..255].mac
+        actions:
+          - name: mac_random
+            arguments: {}
+            energy: 1.0
+          - name: mac_gated
+            arguments: {}
+            energy: 1.0
+          - name: idle
+            arguments: {}
+            energy: 1.0

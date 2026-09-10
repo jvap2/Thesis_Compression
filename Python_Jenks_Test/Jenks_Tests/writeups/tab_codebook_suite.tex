@@ -1,0 +1,49 @@
+% ---------------------------------------------------------------------------
+% tab:codebook-suite -- per-model accuracy for the codebook-design study, over
+% the full eight-model / three-family suite in the deployed W4A4 regime (NVFP4
+% weights + codebook activations). GF4 is the hand-tuned Gaussian codebook; the
+% last three columns are the perplexity change vs. GF4 for the rounded and the
+% two constrained-optimal codebooks (negative = better). Source:
+% codebook_suite.ipynb (Colab, FULL WikiText-2 test set). Companion to the
+% per-codebook summary tab:codebook-design.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Per-model WikiText-2 perplexity in the deployed W4A4 regime (NVFP4
+  weights $+$ codebook activations) across the eight-model, three-family suite.
+  \textbf{GF4} is the hand-tuned Gaussian codebook; the last three columns are the
+  perplexity change relative to GF4 (negative beats GF4) for the rounded codebook,
+  the constrained-optimal Q1.4 codebook $\{0,2,4,6,8,10,13,16\}/16$, and its
+  shift-and-add variant $\{0,2,4,6,8,10,12,16\}/16$. The optimized codebooks beat
+  GF4 on average (mean $-0.06$ each) and stay within $\sim\!0.13$\,PPL of it on
+  every model, while rounding is the worst grid codebook throughout. The codebook
+  solved independently on each model's own activations is the \emph{same} lattice
+  for all eight models, in both constraint settings.}
+  \label{tab:codebook-suite}
+  \small
+  \begin{tabular}{lrrrrr}
+    \toprule
+    & \multicolumn{2}{c}{PPL} & \multicolumn{3}{c}{$\Delta$PPL vs.\ GF4} \\
+    \cmidrule(lr){2-3}\cmidrule(lr){4-6}
+    Model & fp16 & GF4 & round & opt Q1.4 & opt +pc$\le2$ \\
+    \midrule
+    OPT-125M     & $27.66$ & $33.28$ & $-0.351$ & $-0.670$ & $-0.671$ \\
+    OPT-1.3B     & $14.62$ & $17.49$ & $+0.267$ & $+0.025$ & $+0.061$ \\
+    OPT-2.7B     & $12.47$ & $13.42$ & $+0.079$ & $+0.065$ & $+0.061$ \\
+    OPT-6.7B     & $10.86$ & $11.88$ & $+0.125$ & $+0.109$ & $+0.125$ \\
+    OPT-13B      & $10.13$ & $10.70$ & $+0.003$ & $-0.021$ & $-0.020$ \\
+    Mistral-7B   & $5.25$  & $5.80$  & $+0.045$ & $-0.019$ & $-0.014$ \\
+    Qwen2.5-7B   & $6.85$  & $7.40$  & $+0.032$ & $-0.004$ & $-0.010$ \\
+    Qwen2.5-14B  & $5.29$  & $6.04$  & $+0.054$ & $+0.019$ & $+0.009$ \\
+    \midrule
+    \textbf{mean} &        &         & $+0.032$ & $-0.062$ & $-0.057$ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{0.4ex}
+  {\footnotesize All eight models, across the OPT, Mistral, and Qwen families,
+  solve to the identical lattice: $\{0,2,4,6,8,10,13,16\}/16$ unconstrained and
+  $\{0,2,4,6,8,10,12,16\}/16$ under popcount$\,\le\,2$. The popcount constraint
+  differs by a single grid step ($13\!\to\!12$) and costs $\sim\!0.005$\,PPL on
+  average --- essentially free.}
+\end{table}

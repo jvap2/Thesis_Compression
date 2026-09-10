@@ -1,0 +1,9 @@
+read_verilog -sv "phase0_decode/gf4_decode_fixed.v"
+read_verilog -sv "phase0_decode/gf4_pe_row.v"
+chparam -set N 16 -set OPERAND_WIDTH 8 gf4_pe_row
+hierarchy -top gf4_pe_row
+proc; opt; fsm; opt; memory; opt; techmap; opt
+dfflibmap -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+abc -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"
+clean
+tee -o synth_out/phase0/area_row_n16.txt stat -liberty "/home/jvap2/eda/nangate45/lib/NangateOpenCellLibrary_typical.lib"

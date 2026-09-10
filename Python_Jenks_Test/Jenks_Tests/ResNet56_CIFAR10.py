@@ -104,6 +104,8 @@ else:
                                 # transforms.RandomEqualize(),
                                 transforms.ToTensor(),
                                 normalize_4,
+                                # Tier-1: Cutout/RandomErasing — stacks with AutoAugment, +0.3-0.5%, no extra epochs
+                                transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value='random'),
                             ]))
     val_dataset = datasets.CIFAR10(CIFAR10_PATH, train=False,
                                     transform=transforms.Compose([
@@ -118,8 +120,8 @@ Color, and Brightness '''
 
 BATCH_SIZE = 128
 AGD = True
-train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True)
+train_dataloader = DataLoader(dataset=train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+val_dataloader = DataLoader(dataset=val_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
 # model_lenet5v1 = LeNet5V1()
 # model = create_RC56()
 if decl_ETF:
@@ -145,11 +147,11 @@ if AGD:
 model = model.to(device)
 # print(model)  
 min_epochs = 300
-label_smoothing = 0.0
+label_smoothing = 0.1   # Tier-1: reliable +0.2-0.5% on CIFAR ResNet56; stabilizes post-prune finetune
 loss_fn = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 momentum = 0.99
 learning_rate = 1e-2
-weight_decay = 1e-4
+weight_decay = 2e-4
 bias_weight_decay = 0
 warmup_epochs = 10
 nestrov = False
@@ -158,7 +160,7 @@ bias_lr = True
 prune_epoch =  350
 optimizer = init_lr_weight_decay(model, learning_rate, weight_decay,bias_weight_decay=bias_weight_decay, momentum=momentum, nestrov=nestrov, bias_lr=bias_lr, elem_bias = True, warmup_epochs=warmup_epochs, prune_epoch=prune_epoch)
 init_network(optimizer)
-EPOCHS = 400
+EPOCHS = 500
 # scheduler = WarmupMultiStepLR(optimizer, milestones=[80, 120, 140], warmup_factor=0.1, warmup_iters=10, warmup_method="linear")
 adj = False
 schedule = True
@@ -279,7 +281,8 @@ if not decl_ETF:
                     prune_epoch_list=prune_epoch_list, prune_epoch=prune_epoch, prune_between=5,
                     prune_ratio=prune_ratio, one_shot=one_shot, mask=mask,
                     mag_prune=mag_prune, bias_prune=bias_prune, kill_velocity=kill_velocity,
-                    l2=l2, lambda_=lambda_, warmup_epochs=warmup_epochs, min_epochs=min_epochs, elem_bias = True)
+                    l2=l2, lambda_=lambda_, warmup_epochs=warmup_epochs, min_epochs=min_epochs, elem_bias = True,
+                    use_ema=True, ema_decay=0.95)   # Tier-1: epoch-EMA; best_ema_*.pth selected on EMA val acc
     else:
         train_val_loop(model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy, writer, device,
                     experiment_name, model_name, timestamp,

@@ -1,0 +1,85 @@
+% ---------------------------------------------------------------------------
+% Hardware-constrained distribution-aware codebook design -- the novelty framing.
+% Formalizes the codebook (GF4 / Q1.4) as the solution of a constrained
+% optimization, not an ad-hoc rounding. Drop in near the top of \ref{sec:Proposed}
+% (replacing the informal "we use the codebook {0,1,3,5,6,8,11,16}/16" paragraph)
+% or as \subsection{Hardware-Constrained Codebook Design}. Backed by the exact
+% solver in CUDA_FP4_Test/constrained_codebook.py. Needs amsmath.
+% ---------------------------------------------------------------------------
+\subsection{Hardware-Constrained Codebook Design}\label{subsec:codebook-design}
+
+Rather than fix eight magnitudes by hand, we pose the codebook as the solution of
+a \emph{hardware-constrained distribution-aware} optimization. For an operand
+distribution $p$ (the per-block RMS-normalized magnitudes; see below), the
+codebook $\mathcal{C}=\{\ell_0,\dots,\ell_{L-1}\}$ that minimizes reconstruction
+distortion is
+\begin{equation}
+  \mathcal{C}^\star \;=\; \arg\min_{\mathcal{C}}\;
+  \mathbb{E}_{w\sim p}\!\left[\bigl(w - Q_{\mathcal{C}}(w)\bigr)^2\right],
+  \label{eq:codebook-opt}
+\end{equation}
+where $Q_{\mathcal{C}}$ is nearest-level quantization. Unconstrained,
+\eqref{eq:codebook-opt} is the classical distortion-optimal quantizer; GF4's
+equal-mass Gaussian-quantile levels are the companding solution of the same
+problem under a uniform code-usage criterion. Hardware efficiency enters as
+constraints on the admissible levels:
+\begin{align}
+  \mathcal{C}\subset 2^{-m}\mathbb{Z}
+    &\quad\text{(representable on an $m$-bit fractional grid),}
+    \label{eq:c-grid}\\
+  \operatorname{popcount}(|k_i|)\le r
+    &\quad\text{(few set bits $\Rightarrow$ shift-and-add decode),}
+    \label{eq:c-pop}\\
+  |k_i|\le K=2^{m}
+    &\quad\text{(bounded magnitude; top level $=1$),}
+    \label{eq:c-mag}
+\end{align}
+with $\ell_i = k_i/2^m$, $k_i\in\mathbb{Z}$, and optionally $k_i\in\mathcal{H}$
+for a set $\mathcal{H}$ of magnitudes a target datapath supports cheaply. The
+specific format is then \emph{one solution} of \eqref{eq:codebook-opt} under a
+chosen constraint set, not a curated list of constants.
+
+\paragraph{Why the constraint is mild.} A GF4 operand is $x_i=s_b\,\ell(c_i)$
+with per-block scale $s_b=\mathrm{RMS}_b\cdot\alpha$, so the codebook is applied
+\emph{after} RMS normalization: it quantizes the \emph{shape} of the within-block
+distribution while the scale carries the range. The distribution $p$ in
+\eqref{eq:codebook-opt} is therefore the normalized magnitude
+$m=\mathrm{clip}(|z|/\alpha,0,1)$ with $z\sim\mathcal{N}(0,1)$, and only a few
+bits of relative resolution are needed.
+
+\paragraph{We solve, not round.} With the grid \eqref{eq:c-grid} fixed and the
+endpoints pinned ($\ell_0=0,\ \ell_{L-1}=1$), the interior levels are integers in
+$\{1,\dots,2^m-1\}$, so \eqref{eq:codebook-opt} is small enough to solve
+\emph{exactly} by enumeration --- the reported codebook is the true constrained
+optimum. This matters, and not only for distortion. At the $1/16$ grid ($m=4$, $L=8$) the
+exact optimum $\mathcal{C}^\star=\tfrac{1}{16}\{0,2,4,6,8,10,13,16\}$ has $17\%$
+lower distortion than GF4 naively rounded to the same grid
+($\tfrac{1}{16}\{0,1,3,5,6,8,11,16\}$), and at $1/8$ rounding even collapses two
+levels onto the same point whereas the optimizer does not. The gains carry
+through to the end task and the hardware: on WikiText-2 the optimum reaches
+perplexity $30.92$ versus $31.00$ for the hand-tuned Gaussian codebook and
+$31.04$ for its rounding (fp16 baseline $29.52$), while its decode ROM is $53\%$
+smaller than GF4's. Imposing the shift-and-add constraint \eqref{eq:c-pop} with
+$r=2$ costs under $1\%$ additional distortion (and only $+0.05$ perplexity),
+yielding $\mathcal{C}=\tfrac{1}{16}\{0,2,4,6,8,10,12,16\}$ --- a genuinely
+shift-decodable codebook with the smallest decode of all ($61\%$ below GF4) that
+still beats GF4 on accuracy. In other words, solving
+Eqs.~\eqref{eq:codebook-opt}--\eqref{eq:c-mag} yields a format that is
+simultaneously more accurate and cheaper to decode than the hand-designed one;
+GF4 and its rounding are suboptimal instances of the same framework.
+Table~\ref{tab:codebook-design} reports distortion, perplexity, and decode area
+for each.
+
+\paragraph{Relation to prior codebooks.} Distribution-aware 4-bit formats --- NF4
+\cite{dettmers2023qlora}, and the optimized AF4 \cite{yoshida2023af4} and BOF4
+\cite{blumenberg2026bof4} --- optimize the codebook for the weight distribution
+but place levels on the real line, giving arbitrary lookup constants (as does the
+learned any4 \cite{elhoushi2025any4}). Hardware-efficient formats --- additive
+powers-of-two (APoT) \cite{li2020apot} and bit-vector sums (SBVR)
+\cite{bang2025sbvr} --- constrain levels to shift-friendly values but are not
+derived from the operand distribution. Our formulation
+\eqref{eq:codebook-opt}--\eqref{eq:c-mag} unifies the two: it is
+distribution-aware \emph{and} hardware-constrained, and we found no prior 4-bit
+codebook that is a Gaussian-optimal solution on a fixed dyadic lattice. This is
+what makes the format portable across GPUs without Blackwell-specific numeric
+support, while remaining a principled optimum rather than a hand-tuned table.

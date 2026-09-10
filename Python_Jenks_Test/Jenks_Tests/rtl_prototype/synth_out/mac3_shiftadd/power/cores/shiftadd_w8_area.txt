@@ -1,0 +1,79 @@
+
+13. Printing statistics.
+
+=== a_decode_hwcb ===
+
+   Number of wires:                 12
+   Number of wire bits:             23
+   Number of public wires:           8
+   Number of public wire bits:      19
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 12
+     AND2_X1                         2
+     AND3_X1                         1
+     AOI21_X1                        1
+     NAND2_X1                        1
+     NAND3_X1                        1
+     NOR2_X1                         2
+     OR2_X1                          4
+
+   Chip area for module '\a_decode_hwcb': 12.236000
+
+=== shift_add_mult ===
+
+   Number of wires:                189
+   Number of wire bits:            239
+   Number of public wires:          22
+   Number of public wire bits:      72
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                175
+     AND2_X1                         8
+     AND3_X1                         6
+     AOI211_X1                       3
+     AOI21_X1                       20
+     AOI221_X1                       2
+     AOI22_X1                        4
+     INV_X1                          8
+     MUX2_X1                         4
+     NAND2_X1                       13
+     NAND3_X1                       13
+     NAND4_X1                        3
+     NOR2_X1                        20
+     NOR3_X1                         8
+     NOR4_X1                         1
+     OAI211_X1                       5
+     OAI21_X1                       18
+     OAI221_X1                       3
+     OAI22_X1                        5
+     OAI33_X1                        1
+     OR2_X1                          8
+     OR3_X1                          5
+     OR4_X1                          2
+     XNOR2_X1                        9
+     XOR2_X1                         6
+
+   Chip area for module '\shift_add_mult': 197.372000
+
+=== w_decode_e2m1 ===
+
+   Number of wires:                 11
+   Number of wire bits:             24
+   Number of public wires:          10
+   Number of public wire bits:      23
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                 10
+     BUF_X1                          1
+     INV_X1                          5
+     NOR2_X1                         1
+     OAI21_X1                        1
+     OR3_X1                          1
+     XNOR2_X1                        1
+
+   Chip area for module '\w_decode_e2m1': 8.246000
+

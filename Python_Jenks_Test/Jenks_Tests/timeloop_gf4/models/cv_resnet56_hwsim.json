@@ -1,0 +1,532 @@
+{
+  "model": "cv_resnet56",
+  "source": "dense",
+  "input_hw": 32,
+  "note": "conv/linear as GEMM: C=Cin*R*S, K=Cout, N=P*Q; density=1 (dense, GF4 precision study)",
+  "shapes": [
+    {
+      "name": "L0",
+      "K": 27,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 442368
+    },
+    {
+      "name": "L1",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L2",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L3",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L4",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L5",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L6",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L7",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L8",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L9",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L10",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L11",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L12",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L13",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L14",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L15",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L16",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L17",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L18",
+      "K": 144,
+      "N": 16,
+      "batchN": 1024,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L19",
+      "K": 144,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 1179648
+    },
+    {
+      "name": "L20",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L21",
+      "K": 16,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 131072
+    },
+    {
+      "name": "L22",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L23",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L24",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L25",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L26",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L27",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L28",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L29",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L30",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L31",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L32",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L33",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L34",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L35",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L36",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L37",
+      "K": 288,
+      "N": 32,
+      "batchN": 256,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L38",
+      "K": 288,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 1179648
+    },
+    {
+      "name": "L39",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L40",
+      "K": 32,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 131072
+    },
+    {
+      "name": "L41",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L42",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L43",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L44",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L45",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L46",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L47",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L48",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L49",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L50",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L51",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L52",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L53",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L54",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L55",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L56",
+      "K": 576,
+      "N": 64,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 2359296
+    },
+    {
+      "name": "L57",
+      "K": 64,
+      "N": 10,
+      "batchN": 1,
+      "count": 1,
+      "density": 1.0,
+      "macs": 640
+    }
+  ],
+  "total_macs": 125747840,
+  "effective_macs_sparse": 125747840
+}

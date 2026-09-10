@@ -1,0 +1,7 @@
+net,nc,hw,params_full_M,params_compact_M,shrink,lossless_diff,sp_fp16_bs256,sp_fp32_bs256
+VGG-19/CIFAR-10/90_sparsity,10,32,20.04,18.196,1.1,8.9e-16,0.99,1.03
+VGG-19/CIFAR-10/99_sparsity,10,32,20.04,1.867,10.7,1.4e-14,2.09,2.76
+VGG-19/CIFAR-100/90_sparsity,100,32,20.08,20.064,1.0,4.4e-15,1.01,1.08
+VGG-19/CIFAR-100/98_sparsity,100,32,20.08,1.658,12.1,4.5e-13,3.07,4.24
+VGG-19/TinyImageNet,200,64,20.13,5.094,4.0,1.1e-14,2.04,2.34
+VGG19_Test,200,64,20.13,20.132,1.0,0.0e+00,1.0,1.0

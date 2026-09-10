@@ -1,0 +1,8 @@
+layer        dEner_uJ     dDel_cyc     sEner_uJ     sDel_cyc     thru
+L0               4.55         5760         4.55         1460    3.95x
+L1               8.31        21600         7.66        12831    1.68x
+L2               1.68         2736         1.67           68   40.24x
+L3               0.03          190         0.03           23    8.26x
+------------------------------------------------------------------------------
+ENERGY (energy-first)   dense=14.570 uJ  sparse=13.910 uJ  -> sparse/dense = 0.95x
+THROUGHPUT (delay-first) dense=30286 cyc  sparse=14382 cyc  -> speedup = 2.11x

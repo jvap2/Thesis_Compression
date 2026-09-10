@@ -1,0 +1,10 @@
+problem:
+  version: 0.3
+  instance:
+    C: 512
+    K: 200
+    N: 1
+    R: 1
+    S: 1
+    P: 1
+    Q: 1

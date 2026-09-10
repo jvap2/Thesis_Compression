@@ -1,0 +1,90 @@
+% Requires: \usepackage{booktabs}
+% Fill \cite{} placeholders. Table~\ref{tab:sparseloop} rows marked --- are pending
+% the overnight Sparseloop sweep (sparse_sweep_results.txt).
+
+\subsection{From Reported Sparsity to a Realized Speed-Up}
+\label{subsec:sparse-harvest}
+
+The pruned networks of the preceding section report weight sparsities of
+$85$--$99\%$, yet none of them run any faster than their dense counterparts on
+commodity hardware. The reason is that magnitude pruning produces
+\emph{unstructured} sparsity: the surviving weights occupy irregular positions,
+so a general-purpose matrix multiply---on a CPU, a GPU, or through an inference
+runtime such as ONNX---still streams and multiplies the zeros. The floating-point
+operation count is unchanged, and so are latency and energy. Turning a reported
+sparsity into a measurable benefit therefore requires either (i)~restructuring the
+sparsity so that dense hardware can skip it, or (ii)~a specialized accelerator that
+skips zeros natively. We evaluate both.
+
+\paragraph{Structured channel harvesting.}
+We observe that at sufficiently high sparsity, unstructured magnitude pruning
+\emph{emergently} drives entire output channels to zero: for the $98\%$-sparse
+VGG-19, $70\%$ of all convolutional filters are identically zero. Such channels can
+be deleted outright---together with the corresponding input channels they feed---to
+yield a smaller \emph{dense} network that runs faster on any hardware, with no
+special kernels. Because the removed channels contribute nothing to the output
+(after folding the batch-normalization/bias constants they would otherwise emit),
+the transformation is \emph{exactly lossless}: the compact model is numerically
+identical to the original (maximum output deviation $<10^{-12}$ in double
+precision), so accuracy is preserved with zero fine-tuning. Table~\ref{tab:harvest}
+reports the result. The high-sparsity feed-forward networks collapse by
+$3.9$--$12.1\times$ in parameters and deliver up to $4.2\times$ measured GPU
+throughput, entirely losslessly.
+
+Two limits of the method are equally important. First, the effect is subject to a
+\emph{sparsity threshold} near $95$--$97\%$: below it, unstructured pruning does not
+kill whole channels (VGG-19 at $90\%$ sparsity harvests to $1.0\times$), so the
+compression is negligible. Second, and more fundamentally, the method is
+\emph{architecture dependent}. Residual and densely-connected networks distribute
+sparsity across their skip and concatenation paths, so individual channels almost
+never die completely; a dependency-aware pruning of every ResNet-32 and DenseNet-40
+checkpoint removes \emph{zero} channels losslessly, leaving them at $1.0\times$
+(Table~\ref{tab:harvest}, lower block). For these architectures, structured
+harvesting offers nothing.
+
+\paragraph{Accelerator-level exploitation.}
+For the sparsity that structured harvesting cannot reach---the residual networks in
+full, and the $\sim\!87\%$ unstructured sparsity that remains \emph{inside} the kept
+channels of the harvested feed-forward networks---we model a sparsity-aware
+accelerator with the Sparseloop~\cite{sparseloop}/Timeloop~\cite{timeloop} analytical
+framework: a $256$-PE weight-stationary array whose per-processing-element datapath
+\emph{skips} multiply--accumulate operations on zero weights.
+Table~\ref{tab:sparseloop} summarizes the outcome. On the $98\%$-sparse VGG-19 the
+accelerator converts the residual sparsity into a $3.68\times$ whole-network
+throughput improvement and a $21\%$ energy reduction---gains that a dense
+processor structurally cannot obtain. The result carries two caveats that shape the
+broader picture. The throughput benefit only materializes when the mapper is
+permitted to trade energy for latency and when zero-\emph{skipping} (rather than
+mere power-\emph{gating}) is modeled; and weight compression is only admissible at
+the innermost, per-PE register, because compressing weights above the spatial array
+violates the array's fan-out and renders every dataflow mapping invalid. In other
+words, exploiting fine-grained unstructured sparsity is possible, but it is
+contingent on both the dataflow and the optimization objective, and it does not
+reduce the dominant weight-transport energy.
+
+\input{tab_harvest}     % Table~\ref{tab:harvest}
+\input{tab_sparseloop}  % Table~\ref{tab:sparseloop}
+
+\paragraph{The limits of sparsity, and the case for quantization.}
+Taken together, these results delineate what sparsity can and cannot do. Structured
+harvesting is lossless, portable, and large, but it is available only to
+feed-forward architectures above a high sparsity threshold. Accelerator-level
+skipping extends the benefit to unstructured sparsity and to residual networks, but
+only as a latency win on a specialized dataflow, with little or no energy
+improvement because the metadata and weight-transport costs are untouched. Sparsity,
+in short, is powerful but \emph{conditional}: its payoff depends on the network
+topology, the sparsity level, and the target hardware.
+
+This motivates the complementary compression axis studied in the next chapter.
+Reducing the numerical \emph{precision} of the weights and activations is
+\emph{architecture-agnostic}: every layer of every network---including the residual
+and dense models that resist structured harvesting---shrinks by the same bit-width
+ratio, with no dependence on where the nonzeros lie or how the layers are wired.
+Unlike sparsity, low-precision arithmetic reduces the cost of \emph{every} operand
+transfer and multiply directly, attacking exactly the weight-transport energy that
+zero-skipping leaves in place. And because the two axes are orthogonal---one removes
+\emph{which} values are computed, the other reduces the \emph{cost} of each value---
+they compose multiplicatively: a channel-harvested, then quantized, model realizes
+both the structural and the numerical savings at once. The remainder of this thesis
+therefore turns from \emph{which} weights to keep to \emph{how precisely} to
+represent them.

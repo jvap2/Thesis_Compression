@@ -1,0 +1,34 @@
+% ---------------------------------------------------------------------------
+% tab:cuda-speedup -- Real-silicon GF4 W4A16 speedup on an RTX 4080. The fused
+% kernel decodes GF4 codes on-the-fly and multiplies at fp16, never
+% materializing the fp16 weight matrix; the baseline is a DENSE all-fp16 GEMV
+% over native fp16 weights (the format shipped models actually run). Timed with
+% L2 flushed between calls (cold-L2), the regime a real large-model layer runs
+% in -- its weights never sit warm in the 64 MB L2. Source: CUDA_FP4_Test/bench.py
+% section 6 (cuda_time_l2flush), gf4_fused_gemv_kernel.cu.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{Measured GF4 W4A16 GEMV speedup on an NVIDIA RTX 4080 (45\,nm-class
+  Ada, 64\,MB L2), single-token decode. The GF4 kernel fuses codebook decode
+  into the GEMV and multiplies at fp16; the baseline is a dense all-fp16 GEMV
+  over native fp16 weights. Times are \emph{cold-L2} (cache flushed between
+  calls), the memory-bound regime of a real large-model layer whose weights
+  exceed L2 --- the honest denominator for a traffic-reduction speedup. The
+  speedup is the pure weight-traffic win ($3.6\times$ fewer bytes: 4-bit codes
+  $+$ fp16 block scales vs.\ fp16 weights), both paths sharing an identical fp16
+  multiplier. Both kernels are simple warp-per-row reference implementations, so
+  these understate a bandwidth-optimal kernel.}
+  \label{tab:cuda-speedup}
+  \small
+  \begin{tabular}{lrrrc}
+    \toprule
+    Layer & GF4 fused & fp16 dense & \textbf{Speedup} & Weight HBM \\
+    $M\times K$ & ($\mu$s) & ($\mu$s) & (cold-L2) & (fused/dense) \\
+    \midrule
+    $4096\times4096$    & $50.6$  & $82.6$  & $\mathbf{1.63\times}$ & $3.6\times$ \\
+    $11008\times4096$   & $116.3$ & $198.1$ & $\mathbf{1.70\times}$ & $3.6\times$ \\
+    $11008\times11008$  & $301.8$ & $457.2$ & $\mathbf{1.51\times}$ & $3.6\times$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

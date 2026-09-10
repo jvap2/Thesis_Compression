@@ -1,0 +1,12 @@
+DRAM [ Weights:102400 (102400) Inputs:512 (512) Outputs:200 (200) ] 
+global_buffer [ Outputs:200 (200) ] 
+weight_reg [ ] 
+--------------
+| for C in [0:256)
+
+input_reg [ Inputs:2 (2) ] 
+psum_reg [ ] 
+------------
+|   for K in [0:200)
+|     for C in [0:2)
+|       << Compute >>

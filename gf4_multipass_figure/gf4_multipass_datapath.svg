@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 524" font-family="'DejaVu Sans', sans-serif">
+  <defs>
+    <marker id="aInk" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#1B2027"/></marker>
+    <marker id="aAmb" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#B4610F"/></marker>
+    <marker id="aWt" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#37568A"/></marker>
+  </defs>
+  <rect x="0" y="0" width="1080" height="524" fill="#FFFFFF"/>
+
+  <!-- eyebrow -->
+  <text x="30" y="38" font-family="'DejaVu Sans Mono', monospace" font-size="13" letter-spacing="1.5" fill="#B4610F" font-weight="bold">MULTI-PASS RESIDUAL &#183; QUANTIZED FORWARD PASS</text>
+  <line x1="30" y1="50" x2="1050" y2="50" stroke="#E4E8EC" stroke-width="1"/>
+
+  <!-- weights (offline) -->
+  <rect x="600" y="78" width="150" height="56" rx="8" fill="#E6EBF3" stroke="#37568A" stroke-width="1.5"/>
+  <text x="675" y="104" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B2027">&#372;</text>
+  <text x="675" y="123" text-anchor="middle" font-size="11.5" fill="#5A626C">4-bit weights (NVFP4)</text>
+  <line x1="675" y1="134" x2="675" y2="186" stroke="#37568A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#aWt)"/>
+  <text x="685" y="164" font-size="11" font-style="italic" fill="#37568A">shared, all passes</text>
+
+  <!-- ===== forward spine (y-center 220) ===== -->
+  <!-- x -->
+  <rect x="30" y="187" width="130" height="66" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="95" y="216" text-anchor="middle" font-size="16" font-weight="bold" fill="#1B2027">x</text>
+  <text x="95" y="235" text-anchor="middle" font-size="11.5" fill="#5A626C">rotated activation</text>
+
+  <line x1="160" y1="220" x2="193" y2="220" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <!-- r register -->
+  <rect x="195" y="187" width="135" height="66" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="262" y="214" text-anchor="middle" font-size="15" font-weight="bold" fill="#1B2027">r&#160;&#160;residual</text>
+  <text x="262" y="234" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#5A626C">init: r &#8592; x</text>
+
+  <line x1="330" y1="220" x2="363" y2="220" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+  <text x="346" y="212" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" fill="#5A626C">r</text>
+
+  <!-- GF4 quantizer (datapath) -->
+  <rect x="365" y="160" width="180" height="120" rx="10" fill="#FAEBD9" stroke="#B4610F" stroke-width="2.5"/>
+  <text x="379" y="182" font-family="'DejaVu Sans Mono', monospace" font-size="10.5" letter-spacing="1.3" fill="#B4610F" font-weight="bold">DATAPATH</text>
+  <text x="455" y="204" text-anchor="middle" font-size="14.5" font-weight="bold" fill="#B4610F">GF4 quantizer</text>
+  <line x1="381" y1="214" x2="529" y2="214" stroke="#B4610F" stroke-width="1" opacity="0.4"/>
+  <text x="455" y="234" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12.5" fill="#1B2027">q = GF4(r)</text>
+  <text x="455" y="254" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11.5" fill="#5A626C">4-bit code, RMS&#215;2.5</text>
+
+  <!-- q -> GEMM -->
+  <line x1="545" y1="220" x2="578" y2="220" stroke="#B4610F" stroke-width="2" marker-end="url(#aAmb)"/>
+  <text x="561" y="212" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="11" font-weight="bold" fill="#B4610F">q</text>
+
+  <!-- GEMM -->
+  <rect x="580" y="187" width="132" height="66" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="646" y="214" text-anchor="middle" font-size="14.5" font-weight="bold" fill="#1B2027">GEMM</text>
+  <text x="646" y="234" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12" fill="#5A626C">q &#183; &#372;&#7488;  (4b&#215;4b)</text>
+
+  <line x1="712" y1="220" x2="745" y2="220" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+
+  <!-- accumulate -->
+  <rect x="745" y="187" width="145" height="66" rx="8" fill="#FFFFFF" stroke="#C6CCD4" stroke-width="1.5"/>
+  <text x="817" y="214" text-anchor="middle" font-size="14.5" font-weight="bold" fill="#1B2027">accumulate</text>
+  <text x="817" y="234" text-anchor="middle" font-family="'DejaVu Sans Mono', monospace" font-size="12" fill="#5A626C">y &#8592; y + q&#183;&#372;&#7488;</text>
+
+  <line x1="890" y1="220" x2="928" y2="220" stroke="#1B2027" stroke-width="1.6" marker-end="url(#aInk)"/>
+  <text x="1002" y="214" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1B2027">&#8594; next layer</text>
+  <text x="1002" y="233" text-anchor="middle" font-size="11.5" fill="#5A626C">after N passes</text>
+
+  <!-- ===== residual feedback loop (amber) ===== -->
+  <!-- q down to subtract -->
+  <line x1="455" y1="280" x2="455" y2="346" stroke="#B4610F" stroke-width="2" marker-end="url(#aAmb)"/>
+  <text x="463" y="312" font-family="'DejaVu Sans Mono', monospace" font-size="11" font-weight="bold" fill="#B4610F">q</text>
+  <!-- r tap down and into subtract -->
+  <line x1="346" y1="226" x2="346" y2="362" stroke="#B4610F" stroke-width="1.6"/>
+  <line x1="346" y1="362" x2="437" y2="362" stroke="#B4610F" stroke-width="1.6" marker-end="url(#aAmb)"/>
+  <text x="352" y="356" font-family="'DejaVu Sans Mono', monospace" font-size="11" fill="#B4610F">r</text>
+  <!-- subtract node -->
+  <circle cx="455" cy="362" r="16" fill="#FFFFFF" stroke="#B4610F" stroke-width="2"/>
+  <line x1="447" y1="362" x2="463" y2="362" stroke="#B4610F" stroke-width="2.2"/>
+  <text x="481" y="352" font-family="'DejaVu Sans Mono', monospace" font-size="12" font-weight="bold" fill="#1B2027">r &#8592; r &#8722; q</text>
+  <!-- loop back to r register -->
+  <line x1="455" y1="378" x2="455" y2="430" stroke="#B4610F" stroke-width="2"/>
+  <line x1="455" y1="430" x2="262" y2="430" stroke="#B4610F" stroke-width="2"/>
+  <line x1="262" y1="430" x2="262" y2="255" stroke="#B4610F" stroke-width="2" marker-end="url(#aAmb)"/>
+  <rect x="300" y="418" width="132" height="24" rx="6" fill="#FAEBD9" stroke="#B4610F" stroke-width="1.3"/>
+  <text x="366" y="435" text-anchor="middle" font-size="12" font-weight="bold" fill="#B4610F">repeat &#215; N passes</text>
+
+  <!-- bottom identity -->
+  <line x1="30" y1="460" x2="1050" y2="460" stroke="#E4E8EC" stroke-width="1"/>
+  <text x="30" y="484" font-family="'DejaVu Sans Mono', monospace" font-size="13" fill="#1B2027">q1 + q2 + ... + qN  &#8776;  x&#160;&#160;&#8658;&#160;&#160;y = (q1 + ... + qN)&#183;&#372;&#7488;  &#8776;  x&#183;W&#7488;</text>
+  <text x="30" y="508" font-family="'DejaVu Sans', sans-serif" font-size="12.5" font-style="italic" fill="#5A626C">one 4-bit GEMM, reused N times &#8212; the residual (the error) is re-sent through the same weights: no second high-precision datapath.</text>
+</svg>

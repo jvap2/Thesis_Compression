@@ -1,0 +1,33 @@
+# Plain fp16 MAC, NO per-MAC LUT — the GF4 arithmetic when decode is at ingress.
+# Codes are decoded once at the buffer, so the PE just multiplies fp16 operands;
+# the decode LUT is priced analytically (once per DRAM load), not here. fp16 via
+# the Aladdin fpmac primitive (exponent 5, mantissa 10).
+compound_components:
+  version: 0.3
+  classes:
+    - name: fp16_mac
+      attributes:
+        technology: "45nm"
+        datawidth: 16
+      subcomponents:
+        - name: mac
+          class: fpmac
+          attributes:
+            exponent: 5
+            mantissa: 10
+      actions:
+        - name: mac_random
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_random}
+        - name: mac_gated
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_gated}
+        - name: idle
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: idle}

@@ -1,0 +1,34 @@
+
+10. Printing statistics.
+
+=== rom_c16 ===
+
+   Number of wires:                284
+   Number of wire bits:            320
+   Number of public wires:           4
+   Number of public wire bits:      40
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                288
+     AND2_X1                         4
+     AND3_X1                         1
+     AND4_X1                         3
+     AOI21_X1                        1
+     AOI22_X1                        1
+     INV_X1                         11
+     NAND2_X1                       17
+     NAND3_X1                       35
+     NAND4_X1                       18
+     NOR2_X1                        46
+     NOR3_X1                        23
+     NOR4_X1                        12
+     OAI211_X1                       2
+     OAI21_X1                        2
+     OAI222_X1                      17
+     OAI22_X1                       93
+     OR3_X1                          1
+     OR4_X1                          1
+
+   Chip area for module '\rom_c16': 338.086000
+

@@ -83,7 +83,7 @@ module gf4_pe #(
                 .idx      (idx),
                 .sign_in  (sign_bit),
                 .sign_out (dec_sign),
-                .mag_q4_4 (dec_mag)
+                .mag_q1_7 (dec_mag)
             );
         end
     endgenerate

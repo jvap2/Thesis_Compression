@@ -1,0 +1,52 @@
+% ---------------------------------------------------------------------------
+% Codebook-regularity paragraph -- drop in at the end of \ref{sub:rtl} (right
+% after the fixed-vs-programmable decode discussion) or as a short standalone
+% \subsection{Codebook Regularity} before \ref{sec:sw-support}. Cites
+% tab:regularity and the Pareto figure gf4_regularity_pareto.png.
+% ---------------------------------------------------------------------------
+\paragraph{Codebook regularity: why these levels.} The GF4 decode costs
+$\approx$1.5\% of the PE (Table~\ref{tab:node-scaling}) precisely because its
+Gaussian-quantile magnitudes are scattered-bit constants; the regular E2M1
+codebook, whose near-power-of-two levels collapse to a trivial mux, decodes at
+$\approx$0.6\%. This invites a question: could GF4's levels be made more regular
+--- cheaper to decode, friendlier to shift-based hardware --- without losing
+accuracy? We answer it directly by snapping the levels to a Q1.$B$ fixed-point
+grid and measuring both axes: WikiText-2 perplexity (OPT-125M, activations
+GF4-quantized under a blockwise Hadamard rotation) against decode-ROM area
+(synthesized with Yosys against Nangate45). The result (Table~\ref{tab:regularity},
+Figure~\ref{fig:gf4-regularity}) has a clear knee. Rounding the levels to Q1.4
+(nearest $1/16$) keeps all eight levels distinct, shrinks the decode ROM by
+$40\%$ ($15.16\!\rightarrow\!9.04\,\mu\text{m}^2$), and costs only $+0.03$
+perplexity --- essentially free. Snapping harder is not: Q1.3 already begins
+merging levels ($+0.54$ PPL), and a pure power-of-two codebook collapses three
+mid-range levels onto $0.5$, saving more area ($52\%$) but losing $+13$ PPL. The
+accuracy-optimal codebook is therefore mildly regularized (Q1.4--Q1.5), not
+power-of-two. The pattern replicates across model scale: on OPT-1.3B the same
+sweep gives $+0.06$ PPL at Q1.4 and $+13$ at power-of-two, so the knee is a
+property of the codebook, not of a particular network.
+
+This tolerance is a direct consequence of GF4's operand form. Because a GF4 value
+is $x_i = s_b\,\ell(c_i)$ with per-block scale $s_b = \text{RMS}_b\cdot\alpha$,
+the codebook $\ell(\cdot)$ is applied \emph{after} per-block RMS normalization: it
+quantizes only the \emph{shape} of the within-block distribution, while the scale
+carries the dynamic range. Four bits of relative resolution ($1/16$) are thus
+sufficient, and the result is robust to the scale's own precision --- quantizing
+the block scale to E4M3, GF4's deployed weight-scale format, moves exact-GF4
+perplexity by $+0.05$ and leaves the Q1.4 conclusion unchanged. We retain the
+full-precision Gaussian-quantile levels in the reported results, since the decode
+is already near-free; the Q1.4 point is available as a drop-in when a design
+prioritizes decode area or shift-friendly hardware over the last $0.03$ of
+perplexity.
+
+% --- figure float for the Pareto (needs \usepackage{graphicx}) ---
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.72\linewidth]{figures/gf4_regularity_pareto.png}
+  \caption{Accuracy vs.\ decode-area for regularized GF4 codebooks. Snapping the
+  Gaussian-quantile levels to a coarser fixed-point grid shrinks the decode ROM
+  (x-axis) but eventually collapses levels and degrades perplexity (y-axis).
+  Q1.4 (circled) is the knee: $40\%$ smaller decode for $+0.03$ PPL; power-of-two
+  snapping saves more area but costs $+13$ PPL. WikiText-2 / OPT-125M, A-only GF4
+  under a blockwise Hadamard.}
+  \label{fig:gf4-regularity}
+\end{figure}

@@ -1,0 +1,467 @@
+% ===========================================================================
+% Hardware Realization -- REFRAMED (drop-in for \section{Hardware Realization}
+% \label{sec:Proposed}). Changes vs. the prior draft, all surgical:
+%   1. Fixed the inverted-thesis sentence ("we do claim" -> "we do NOT claim").
+%   2. GF4 is modeled ONLY at fp16 (gf4_real, Table~\ref{tab:gf4-energy}); int4
+%      appears solely as the NVFP4/E2M1 baseline, never on GF4. The decode is
+%      isolated multiply-free (MAC removed from both engines), so no number
+%      charges GF4 a 4-bit multiply (int4-as-GF4 tables discarded).
+%   3. Named the dense-fp16 CUDA baseline (Table~\ref{tab:cuda-speedup}) beside
+%      the fake-quant naive baseline.
+%   4. Folded the CNN rows of Tables~\ref{tab:lut},~\ref{tab:gf4-energy} in.
+%   5. LUTxLUT figure reconciled to the synth log (9376 vs 2180 um^2; joint
+%      table 8877 um^2) and framed as the validated dead-end that confirms
+%      decode-then-multiply.
+%   6. Typo "frame the of this section" -> "frame the reading of this section".
+% ===========================================================================
+
+% To improve the hardware compatibility of Gaussian-aware 4-bit quantization, we use the codebook
+% \(\mathcal{C}=\{0,1,3,5,6,8,11,16\}/16\), which approximates the distribution-aware levels of NormalFloat while constraining all 
+% reconstruction values to a fixed \(1/16\) lattice. Although prior work has explored distribution-aware 4-bit codebooks such as NF4, 
+% optimized variants such as AF4 and BOF4, and hardware-efficient nonuniform representations such as APoT and SBVR 
+% \cite{dettmers2023qlora,yoshida2023af4,blumenberg2026bof4,li2020apot,bang2025sbvr}, we found no prior work using this specific Gaussian-derived 
+% fixed-point codebook. This distinguishes our approach from methods that employ arbitrary floating-point lookup tables, such as any4 
+% \cite{elhoushi2025any4}, and motivates its potential for efficient implementation across GPUs without relying on Blackwell-specific numerical formats.
+
+
+% @article{dettmers2023qlora,
+%   title   = {QLoRA: Efficient Finetuning of Quantized LLMs},
+%   author  = {Dettmers, Tim and Pagnoni, Artidoro and Holtzman, Ari and Zettlemoyer, Luke},
+%   journal = {Advances in Neural Information Processing Systems},
+%   volume  = {36},
+%   year    = {2023}
+% }
+
+% @article{yoshida2023af4,
+%   title   = {Affine4: A New 4-Bit Quantization Method for Large Language Models},
+%   author  = {Yoshida, Gakuto},
+%   journal = {arXiv preprint arXiv:2306.06965},
+%   year    = {2023}
+% }
+
+% @inproceedings{blumenberg2026bof4,
+%   title     = {Improving Block-Wise LLM Quantization by 4-bit Block-Wise Optimal Float (BOF4): Analysis and Variations},
+%   author    = {Blumenberg, Patrick and Graave, Thomas and Fingscheidt, Tim},
+%   booktitle = {International Conference on Learning Representations},
+%   year      = {2026}
+% }
+
+% @inproceedings{li2020apot,
+%   title     = {Additive Powers-of-Two Quantization: An Efficient Non-uniform Discretization for Neural Networks},
+%   author    = {Li, Yuhang and Dong, Xin and Wang, Wei},
+%   booktitle = {International Conference on Learning Representations},
+%   year      = {2020}
+% }
+
+% @article{bang2025sbvr,
+%   title   = {SBVR: Summation of BitVector Representation for Efficient LLM Quantization},
+%   author  = {Bang, Wonjun and Park, Jongseok and Yu, Hongseung and Bin, Kyungmin and Lee, Kyunghan},
+%   journal = {arXiv preprint arXiv:2509.18172},
+%   year    = {2025}
+% }
+
+% @inproceedings{elhoushi2025any4,
+%   title     = {any4: Learned 4-bit Numeric Representation for LLMs},
+%   author    = {Elhoushi, Mostafa and Johnson, Jeff},
+%   booktitle = {Proceedings of the 42nd International Conference on Machine Learning},
+%   volume    = {267},
+%   pages     = {15215--15231},
+%   year      = {2025},
+%   publisher = {PMLR}
+% }
+
+\section{Hardware Realization}\label{sec:Proposed}
+
+We propose and simulate an inexpensive dedicated hardware unit to support both
+codebook flexibility and outlier robustness. This includes modeling a
+weight-stationary FP4 systolic array in Timeloop and Accelergy
+\cite{parashar2019timeloop,wu2019accelergy}, evaluating and confirming these
+models with an RTL implementation in Verilog, and then evaluating two things:
+(1) the cost of a fully programmable decode table, and (2) the cost of serving
+outlier layers with multiple passes compared to a dedicated FP16 unit.
+
+Three claims are being made in this section, and they are evaluated separately
+because they rest on different evidence. The first is that a programmable
+codebook, the mechanism that lets the same hardware decode either NVFP4 or GF4,
+costs almost nothing if it is placed in the right spot in the datapath.
+Section \ref{subsec:acc} and Section \ref{subsec:progcode} establish this with a
+Timeloop/Accelergy component model. The second is that outlier layers can be
+served by summing multiple GF4 passes into one operand and multiplying once
+through a modestly widened multiplier, rather than adding a full second,
+16-bit-wide arithmetic datapath, covered in Section \ref{subsec:multipass}.
+Section \ref{sub:rtl} then checks both against real evidence beyond the component
+model with a synthesized RTL prototype and measured CUDA kernels --- and, in
+doing so, finds that the two ways of executing GF4's arbitrary magnitudes (a
+product-table datapath and GPU decode-to-fp16) are each unfruitful as a
+hardware-native format. That negative result motivates the third and central
+claim: the codebook itself can be constrained to a fixed-point lattice and
+\emph{optimized} within that constraint, yielding a format that is cheap to
+decode by construction, universal across models, and iso-accurate with the
+hand-tuned Gaussian codebook (Section \ref{subsec:codebook-design}).
+
+The mechanism for this proposed hardware is as follows. A conventional FP4
+accelerator decodes each 4-bit code by looking it up in a small, fixed table of
+magnitudes (E2M1's eight values) before feeding it to a multiplier. We keep that
+exact decode-then-multiply structure and change exactly one thing.
+Specifically, the table's contents are no longer hardwired, but held in a small
+writable register file, so the same array can decode either NVFP4's magnitudes
+or GF4's. Section \ref{subsec:acc} quantifies what that one change costs in a
+realistic accelerator model. Section \ref{subsec:progcode} shows where in the
+pipeline to place the decode so that cost is nearly zero; Section
+\ref{subsec:multipass} covers the separate mechanism that handles outlier
+layers. Section \ref{sub:rtl} confirms both mechanisms in real RTL and on real
+GPU hardware. Note that results for the aforementioned sections characterize the
+single-pass (T=1) engine, and the widened multiplier residual GF4 requires for
+T$>$1 is not separately synthesized or measured here. A note of realism helps to
+frame the reading of this section. GF4's magnitude levels are not four-bit
+values, so no genuine four-bit GF4 multiplier exists. The 4-bit code indexes an
+eight-entry codebook of FP4's cardinality, whose magnitudes are held at higher
+precision and feed an ordinary ($\approx$16-bit) multiplier. The accelerator's
+contribution is therefore not a narrower multiplier but a nearly free,
+programmable \emph{decode}. The component model prices GF4's arithmetic
+faithfully --- an fp16 multiply on the decoded $\approx$16-bit magnitude --- and
+reports GF4's total cost, decode plus fp16 multiply, directly against the NVFP4
+baseline (Table~\ref{tab:gf4-energy}); to isolate the decode alone it removes the
+multiplier from both engines and prices the codebook against the memory system
+(Table~\ref{tab:lut}), a number that does not depend on how arithmetic is
+modeled. GF4 is never modeled on a 4-bit multiplier: its levels are not 4-bit
+values, so that would misstate its cost. Because the decode-then-multiply
+structure already runs on every deployed GPU, the immediately usable realization
+is the CUDA kernels of Section~\ref{sec:sw-support}, not a bespoke chip.
+
+
+\subsection{Accelerator Model}\label{subsec:acc}
+
+In Timeloop with Accelergy component energy/area (45 nm, Aladdin/CACTI) we model
+a weight-stationary 16$\times$16 (256-PE) systolic array (DRAM $\rightarrow$
+global buffer $\rightarrow$ per-PE register files $\rightarrow$ MAC). The GF4 PE
+--- the programmable-decode datapath proposed above --- pairs a 16-entry codebook
+register file with an fp16 multiplier: because GF4's levels are not four-bit
+values, the decoded operand is a $\approx$16-bit magnitude and the multiply is
+genuinely fp16, which is exactly how we model it (engine \texttt{gf4\_real}). The NVFP4 baseline is the identical array with the
+codebook removed and a 4-bit fixed-point MAC --- the faithful low-energy proxy
+for a native E2M1 unit (Accelergy cannot represent E2M1; see below). Modeling
+GF4 at fp16 and NVFP4 at int4 is the honest pairing: it charges each format for
+the multiplier it actually uses, and never prices GF4 on a 4-bit MAC it does not.
+The decode is then isolated \emph{multiply-free} (Table~\ref{tab:lut}), removing
+the MAC from both engines so the codebook's cost stands on its own.
+
+Weight-stationary dataflow keeps decoded weights resident and reused across
+activation columns, which is why decode-at-ingress is natural here and why the
+placement is nearly free. It is also the canonical GEMM dataflow (Eyeriss, TPU),
+making the baseline uncontroversial. 256 PEs is the smallest array where a
+realistically provisioned global buffer dominates area. Smaller arrays are
+governed by per-PE and array-edge overheads Accelergy models only coarsely,
+whereas larger arrays require proportionally larger buffers, leaving the
+codebook's area share unchanged or smaller. All claims are ratios (codebook
+overhead per PE, energy/token), so they are scale-invariant. We stay at the
+45 nm node so every number traces to a validated CACTI/Aladdin library rather
+than an advanced-node extrapolation. The relative ordering is node-robust.
+Two engines are simulated directly in Timeloop/Accelergy: \texttt{gf4\_real} ---
+our proposed datapath, a programmable codebook decode feeding an fp16 multiply ---
+and a native NVFP4 baseline (table-free, int4 MAC; identical 2.394 mm$^2$ array
+area). These differ in \emph{both} the decode (table vs.\ none) \emph{and} the
+multiplier (fp16 vs.\ int4), so their raw difference is the realistic total cost
+of Table~\ref{tab:gf4-energy}, decode plus wider multiply. To isolate the codebook
+alone we remove the multiplier from both engines --- the multiply-free figure of
+Table~\ref{tab:lut}. This is also precisely the picture \emph{on the proposed
+datapath itself}: there a single fp16 multiplier serves either format and only the
+writable table's contents change, so switching a layer from NVFP4 to GF4 costs
+nothing but that table, and the multiply-free number \emph{is} that switching cost.
+The codebook's own energy is read from the simulated decode component, and the
+decode-at-ingress placement is priced analytically from these same runs' access
+counts and cross-checked against the RTL decode synthesis
+(Table~\ref{tab:node-scaling}).
+
+\paragraph{Faithful multiply cost.} With GF4 modeled at fp16 throughout, the
+wider multiply is measured rather than assumed. Holding the decode placement
+fixed, the fp16-multiply premium is $11.3$--$20.0\%$ on the compute-bound language models
+and $0$--$3.3\%$ on the memory-bound CNNs, whose energy is dominated by memory
+traffic; the realistic total GF4 overhead (decode $+$ fp16 multiply) is
+$32.6$--$42.7\%$ (LLMs) and $3.4$--$20.8\%$ (CNNs), reported in
+Table~\ref{tab:gf4-energy}. One modeling caveat must be stated plainly: Accelergy's
+Aladdin models cannot represent an E2M1 (2-exponent, 1-mantissa) multiplier ---
+the \texttt{fpmac} primitive floors near fp8, so a literal E2M1 unit reports
+\emph{higher} energy than a 4-bit integer MAC, which is physically backwards. We
+therefore keep the NVFP4 baseline modeled as a 4-bit fixed-point MAC, the
+faithful low-energy proxy for a native E2M1 unit; a true E2M1 unit is no cheaper,
+so the premiums above are, if anything, conservative.\footnote{A hardware run
+with a custom-characterized E2M1 multiplier would remove this proxy and tighten
+the multiply-cost figures; the decode-isolation and speedup conclusions are
+unaffected by it.}
+
+
+\subsection{Programmable-Codebook Cost}\label{subsec:progcode}
+
+The energy model prices a conservative 16-entry (full 4-bit) table, though GF4
+needs only 8 magnitude entries plus a sign bit. The MAC and a 16-entry table
+read each cost $\approx$ 1 pJ at 45 nm (Aladdin/CACTI, c.f Chapter
+\ref{chap:refsysmod}), so the energy cost of the table is set by how often it is
+read, which in turn is set by where in the datapath it fires.
+
+Decode-per-MAC fires on every multiply and reads both operands' tables, so its
+cost is priced at 2 $\times$ Computes table reads, independent of reuse. We report
+this decode cost \emph{multiply-free} --- the codebook's energy against the
+memory system, with the multiplier removed from both engines --- so it does not
+depend on how arithmetic is modeled and never charges GF4 a 4-bit multiply. On
+that basis the decode costs 15.71\% (OPT-125M), 25.62\% (OPT-1.3B), and 23.75\%
+(Llama-2-7B) of the memory system (Table \ref{tab:lut}). This is not a monotonic
+function of model or hidden-dimension size. Based upon our measurements
+Llama-2-7B's overhead is slightly below OPT-1.3B's despite a larger hidden
+dimension. What it does track is the share of total energy spent on compute
+versus memory traffic. OPT-125M is the most memory-bound of the three, so its
+memory system is the largest fraction of the total and the codebook's share of
+it is smallest. In contrast, OPT-1.3B and Llama-2-7B are both more
+compute-energy-dominated and land in a similar, higher band. We don't have (and
+don't claim) a clean scaling law linking the overhead to a single architectural
+parameter across all three points.
+
+Compared to Decode-per-MAC, Decode-at-ingress instead fires once per operand
+loaded from DRAM into the global buffer. Because a weight-stationary array reuses
+each loaded operand across many MACs, the table is read only \verb|DRAM_accesses|
+times rather than 2 $\times$ Computes times. We price this placement analytically
+rather than simulating it directly as this is a methodological necessity, not a
+choice. The decode-per-MAC attaches the LUT to a compute compound (MAC + table),
+which Accelergy models correctly. Conversely, decode-at-ingress attaches the LUT
+to a storage compound (the global-buffer SRAM), and wrapping a storage element in
+an Accelergy compound triggers a known estimation bug that collapses its
+area/energy (an initial direct simulation attempt returned nonsense figures such
+as -80\% area). Timeloop's event-counting is unaffected by this bug, so we
+instead take the DRAM access counts from the same, reliable NVFP4 Timeloop run
+and price the decode cost by hand at \verb|E_LUT| = 1 pJ per 16-entry read,
+grounded to a single regfile read at 45 nm. This analytical method
+(\verb|accesses| $\times$ \verb|E_LUT|) reproduces the simulated codebook-decode
+component energy to the decimal, and is independently corroborated by the RTL
+decode synthesis (Table~\ref{tab:node-scaling}, $\approx$1.5\% of the PE). Priced
+this way against the NVFP4 baseline, decode-at-ingress costs 1.08\%, 0.36\%, and
+0.68\% for OPT-125M, OPT-1.3B, and Llama-2-7B respectively. These are decode-only
+figures; GF4's fp16 multiply is measured separately and reported in
+Table~\ref{tab:gf4-energy} (Section~\ref{subsec:acc}).
+
+On that basis, decode-at-ingress costs 0.36--1.08\% energy and a flat 0.01\% area
+across all three models tested. Reuse cuts the codebook cost sharply relative to
+per-MAC decode --- the table fires once per DRAM load instead of twice per MAC, a
+13--63$\times$ reduction across the three models. In other words, the codebook's
+relative cost is small and, once placed at ingress, nearly vanishes. At-ingress trades a 2$\times$ larger
+on-chip buffer for decoded operands (weights/activations are held decoded on-chip
+rather than as 4-bit codes) but keeps DRAM traffic and the bandwidth-critical
+path at 4-bit throughout.
+
+The same pattern holds across convolutional networks
+(Tables~\ref{tab:lut},~\ref{tab:gf4-energy}): the multiply-free decode ranges
+from $3.5\%$ (LeNet-300-100) to $19\%$ (ResNet-56), and the fp16-multiply premium
+stays $\le 3.3\%$ throughout, confirming the memory-bound regime in which GF4's
+cost is decode rather than arithmetic.
+
+Unlike per-tensor format selection (ANT, AdaptivFloat), which fixes the format
+once chosen, GF4's table is re-decodable per access at the same amortized cost,
+because decode-at-ingress ties cost to DRAM traffic, not to the number of formats
+supported.
+
+
+\subsection{Multi-Pass Precision}\label{subsec:multipass}
+
+Residual GF4 generalizes to T passes, with each pass quantizing the residual of
+previous passes. The T codes are summed in full precision before the multiply, so
+the PE's multiplier is widened once to match the summed operand rather than being
+replicated T times. Precision is dictated by pass count, traded against that
+one-time multiplier widening rather than against an T-way LUT$\times$LUT product
+table, which Section \ref{sub:rtl}'s RTL synthesis shows costs 4.3$\times$ more
+area than a decode-then-multiply baseline. The residual of a GF4-quantized
+Gaussian is itself near-Gaussian, so GF4 stays near-optimal on every subsequent
+pass. The first residual pass cuts relative RMS error by roughly $8\times$
+(10.16\% $\rightarrow$ 1.21\% on Gaussian input, c.f.\ Table~\ref{tab:nvfp4_noise}).
+
+
+\subsection{RTL Verification}\label{sub:rtl}
+
+The cost claims of Section \ref{subsec:progcode} combine a Timeloop/Accelergy
+component model, measured directly for per-MAC and the NVFP4 baseline, with an
+analytical extension of that same model's access counts for decode-at-ingress.
+Both are validated pre-silicon methodology, but a model, not a circuit. This
+section provides a synthesizeable RTL prototype to verify results.
+
+We built and verified a staged RTL prototype of the datapath in synthesizable
+Verilog, confirmed end-to-end on two independent simulators (Icarus Verilog and
+Verilator) and cross-checked at each stage. Its most aggressive element is a
+joint weight-code~$\times$~activation-code product table (``LUT$\times$LUT'') that
+replaces decode-then-multiply outright. The LUT$\times$LUT is a single 64-entry
+lookup ($8\times8$ magnitude products) plus a sign XOR, yielding the operand
+product directly with no multiplier.
+
+Correctness and area are separate claims, and the area results show that removal
+of the multiplier does not save area. Synthesized against a fair
+decode-then-multiply baseline (both operands decoded through an 8-entry
+programmable table, then multiplied) with real RTL synthesis (Yosys/ABC,
+Nangate45, not a component model), the 64-entry joint product table costs
+9376\,\textmu m$^2$ against the baseline's 2180\,\textmu m$^2$. Area required for
+LUT$\times$LUT is 4.3$\times$ larger, not smaller, at single-PE granularity. The
+table's storage dominates (8877\,\textmu m$^2$ of the 9376 total), whereas a
+9-bit signed multiplier is comparatively inexpensive in standard cells, and these
+results match an independent finding from LUT Tensor Core~\cite{mo2025lut}:
+conventional LUT-based mpGEMM designs lose their area advantage over MAC-based
+designs once weight precision exceeds 2 bits, specifically because of table
+precompute and storage overhead. Their fix is array-level table reuse and tiling
+across many PEs, an optimization this single-PE RTL prototype does not implement.
+We report this cost honestly rather than claim an unqualified win. At this scale,
+LUT$\times$LUT's benefit is a genuinely multiplier-free datapath and the
+falsifiable correctness guarantee verified above, not a demonstrated area
+reduction. Crucially, this does not weaken GF4: GF4's datapath is
+decode-then-multiply, which the same synthesis shows is the cheaper of the two,
+so the LUT$\times$LUT result confirms rather than undermines the chosen design.
+
+Due to the cost of replacing the multiplier with a product table, we retain the
+multiplier to then examine the alternatives of various decode LUT forms. From RTL
+synthesis, a fixed hardcoded GF4 decode incurred $15\,\mu\text{m}^2$ at 45\,nm,
+roughly $1.5\%$ of a PE, and this metric remains constant across a node sweep of
+sizes 130, 45, and 7\,nm ($1.61\%$, $1.46\%$, $1.57\%$; Table~\ref{tab:node-scaling}).
+Writable decodes prove to be far more expensive, with a fully programmable
+register file decode costing $599.56\,\mu\text{m}^2$, $40\times$ the fixed decode
+size. When the writable table is folded into a complete PE, the marginal cost
+falls to $+53\,\mu\text{m}^2$ per PE (a programmable-decode PE is
+$1021\,\mu\text{m}^2$ versus the fixed-decode PE's $968\,\mu\text{m}^2$, a
+$+5.5\%$ increase). Even at that reduced figure, the array has 256 PEs, so putting
+a writable table in each one pays $+5.5\%$ 256 times over, for a table whose
+contents are identical in every PE.
+
+GF4 avoids the whole tax by committing to a hardwired decode, so it only pays the
+$\approx$$1.5\%$ per-PE fixed cost and never instantiates a writable table inside
+the array. In scenarios where the design genuinely needs to switch codebooks,
+e.g. decode NVFP4 or GF4 on the same hardware, that single writable table should
+be placed \emph{at ingress}. It is read once per operand as it loads from DRAM
+into the buffer and then decoded once and reused across all of that operand's
+MACs (Table~\ref{tab:lut}), rather than duplicated in every PE, in order to
+amortize energy costs.
+
+\paragraph{Measured GPU speedup.} Section~\ref{sec:sw-support} provides a
+complementary, immediately deployable validation path: a suite of CUDA kernels
+that run the same decode-then-multiply datapath on any modern NVIDIA GPU. Against
+a dense all-fp16 GEMV --- native fp16 weights, the format deployed models
+actually run --- the fused GF4 GEMV is $1.5$--$1.7\times$ faster in the
+memory-bound regime (L2 flushed between calls, so weights stream from HBM as in a
+real large-model layer; Table~\ref{tab:cuda-speedup}). This is the pure
+weight-traffic win ($3.6\times$ fewer bytes) at an identical fp16 multiplier on
+both sides, corroborating the component model's decode-and-traffic story on
+production silicon.
+
+Section~\ref{sec:sw-support} details these kernels; the important point for the
+hardware argument is that the decode-then-multiply structure GF4 commits to is
+not only cheap in the RTL and the component model, but already fast on GPUs in
+the field.
+
+
+\subsection{Hardware-Constrained Codebook Design}\label{subsec:codebook-design}
+
+Section~\ref{sec:sw-support} closed on the one cost an arbitrary
+distribution-matched codebook cannot shed: its decode is a lookup of irregular
+magnitudes. The other obvious route to removing it is ruled out by the RTL of
+Section~\ref{sub:rtl} --- a multiplication-free product table (LUT$\times$LUT) over
+the codebook costs $4.3\times$ the PE area, because a table over arbitrary
+magnitudes is large. A product table and GPU decode-to-fp16 both \emph{accept}
+GF4's irrational levels and pay to work around them. We take the opposite move:
+constrain the codebook itself to hardware-representable values and optimize
+\emph{within} that constraint, so the format is cheap to decode by construction
+rather than by emulation.
+
+We therefore pose the codebook as the solution of a hardware-constrained,
+distribution-aware optimization. For the operand distribution $p$ (the per-block
+RMS-normalized magnitudes), the codebook $\mathcal{C}=\{\ell_0,\dots,\ell_{L-1}\}$
+minimizing reconstruction distortion is
+\begin{equation}
+  \mathcal{C}^\star = \arg\min_{\mathcal{C}}\;
+  \mathbb{E}_{w\sim p}\!\left[(w - Q_{\mathcal{C}}(w))^2\right],
+  \label{eq:codebook-opt}
+\end{equation}
+with $Q_{\mathcal{C}}$ nearest-level quantization, subject to hardware
+constraints on the levels: $\mathcal{C}\subset 2^{-m}\mathbb{Z}$ (representable on
+an $m$-bit fractional grid), $|k_i|\le 2^{m}$ (bounded magnitude, top level
+$=1$), and optionally $\operatorname{popcount}(k_i)\le r$ (few set bits, so decode
+is shift-and-add). The magnitudes $\ell_i=k_i/2^m$ are integers on the grid; GF4
+is the continuous ($m\!\to\!\infty$) Gaussian-quantile solution, and the deployed
+format is one solution of \eqref{eq:codebook-opt} under a chosen constraint set.
+
+\paragraph{We solve, not round.} With the grid fixed at $1/16$ ($m=4$) and the
+endpoints pinned, the six interior levels are integers in $\{1,\dots,15\}$, so
+\eqref{eq:codebook-opt} has only $\binom{15}{6}=5005$ feasible codebooks and is
+solved \emph{exactly} by enumeration --- the reported codebook is the global
+constrained optimum, not a rounding or a local (gradient/$k$-means) solution as
+in learned-codebook methods. Crucially, we solve it on each model's \emph{own}
+post-Hadamard activations (a short calibration pass), not on an assumed Gaussian.
+The optimum $\mathcal{C}^\star=\tfrac{1}{16}\{0,2,4,6,8,10,13,16\}$ has $17\%$
+lower distortion than GF4 rounded to the same grid
+($\tfrac{1}{16}\{0,1,3,5,6,8,11,16\}$), which collapses adjacent levels at coarser
+grids; and it is remarkably \emph{stable} across models. Solved independently on
+each model's own activations over eight models and three families (OPT-125M–13B,
+Mistral-7B, Qwen2.5-7B/14B), the shift-and-add optimum
+$\tfrac{1}{16}\{0,2,4,6,8,10,12,16\}$ is \emph{identical for all eight}, and the
+unconstrained optimum for seven (Qwen2.5-7B differs by a single grid step,
+$13\!\to\!12$); the first six interior levels never vary. A single fixed-point
+lattice codebook therefore suffices --- no per-layer or per-model lookup table,
+unlike GPU-adaptive schemes such as GANQ~\cite{zhao2025ganq}. Notably, the
+hardware constraint \emph{regularizes} the optimum: the popcount-constrained
+codebook is perfectly stable where the unconstrained one wobbles by one level.
+
+\paragraph{Results.} Table~\ref{tab:codebook-design} reports distortion, mean
+perplexity gap, and decode-ROM area for the candidate codebooks. Over the
+eight-model, three-family suite in the deployed W4A4 regime (NVFP4 weights $+$
+codebook activations), the constrained optima match or slightly beat hand-tuned
+GF4 on average --- mean $\Delta$PPL $-0.06$ (Q1.4) and $-0.09$
+(popcount$\le2$), with the full per-model breakdown in
+Table~\ref{tab:codebook-suite} --- while cutting decode-ROM area by $53\%$ and $61\%$
+respectively; the shift-and-add codebook $\tfrac{1}{16}\{0,2,4,6,8,10,12,16\}$ is
+both the cheapest to decode and the best on average. Naive rounding, by contrast,
+is the worst grid codebook on every model (Figure~\ref{fig:codebook-suite}a). The
+value is thus hardware at iso-accuracy: the constrained optimum matches the
+distribution-aware codebook while being natively cheap to decode, and
+Figure~\ref{fig:codebook-suite}b shows the solved codebook is the same lattice for
+every model save a single one-step deviation.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{figures/gf4_codebook_suite.png}
+  \caption{The constrained-optimal codebook over an eight-model, three-family
+  suite (W4A4). \textbf{(a)} Perplexity gap vs.\ hand-tuned GF4 against model
+  scale: the optimized codebooks track the GF4 baseline at every scale (dotted
+  lines are means, both below zero), while naive rounding sits above it.
+  \textbf{(b)} The codebook solved independently on each model's own activations
+  is the same $k/16$ lattice for all eight models; the only variation is
+  Qwen2.5-7B's penultimate level ($13\!\to\!12$, one grid step) --- so a single
+  fixed-point codebook suffices, with no per-model lookup table.}
+  \label{fig:codebook-suite}
+\end{figure}
+
+\paragraph{Measured GPU decode speedup.} The lattice constraint pays off on
+today's GPUs, not only on the ASIC. We add a decode path to the fused
+W4A16 GEMV of Section~\ref{sec:sw-support} that decodes the optimal codebook by
+shift-and-add ($k=2\,\mathrm{idx}$, so $\ell=k/16$), touching no table, and
+benchmark it against GF4's arbitrary codebook decoded from a lookup table.
+Table~\ref{tab:gpu-speedup} reports the result on an RTX 4080: two effects
+compose --- the $3.6\times$ weight-traffic reduction any 4-bit format enjoys over
+dense fp16 ($1.5$--$1.7\times$), and a further $1.6$--$1.9\times$ from the
+table-free decode --- for a net $2.6$--$3.1\times$ over dense fp16 in the
+memory-bound (cold-L2) regime. The decode win is mechanistic: an arbitrary
+codebook must be read from a table, and a constant-memory lookup with
+\emph{divergent} codes across a warp serializes (constant memory is
+broadcast-optimized), a cost that persists even when the kernel is otherwise
+memory-bound; the lattice codebook is pure arithmetic and pays none of it. The
+comparison is against a constant-memory table --- a register- or shared-resident
+LUT would narrow the gap --- but the lattice is fundamentally table-free, so no
+lookup implementation can be faster. This is the deployment counterpart to the
+ASIC decode savings: the same property that shrinks the ROM (Table~\ref{tab:node-scaling})
+removes the lookup on the GPU.
+
+\paragraph{Relation to prior codebooks.} Distribution-aware 4-bit formats ---
+NF4~\cite{dettmers2023qlora} and the optimized AF4~\cite{yoshida2023af4} and
+BOF4~\cite{blumenberg2026bof4} --- optimize the codebook for the weight
+distribution but place levels on the real line, giving arbitrary lookup constants
+(as does the learned any4~\cite{elhoushi2025any4}). Hardware-efficient formats ---
+additive powers-of-two (APoT)~\cite{li2020apot} and bit-vector sums
+(SBVR)~\cite{bang2025sbvr} --- constrain levels to shift-friendly values but are
+not derived from the operand distribution. GPU-adaptive schemes such as
+GANQ~\cite{zhao2025ganq} optimize an arbitrary per-layer LUT. Our formulation
+\eqref{eq:codebook-opt} is distribution-aware \emph{and} hardware-constrained,
+and (per the universality above) a single lattice codebook rather than a per-layer
+table; we found no prior 4-bit codebook that is a Gaussian-optimal solution on a
+fixed dyadic lattice. That is what keeps the format portable across GPUs without
+Blackwell-specific numeric support, while remaining a provable optimum rather than
+a hand-tuned table.

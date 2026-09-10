@@ -1,2 +1,0 @@
-Epoch: 1
-Iteration: 1| Loss:  2.30726| Acc:  0.08984 | Top 5 Acc:  0.48331 |L_2:  1.00000

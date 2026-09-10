@@ -90,17 +90,17 @@ module gf4_pe_decode_then_multiply #(
                 .mag_out  (a_dec_mag)
             );
         end else begin : g_fixed
-            gf4_decode_fixed u_decode_w (
+            e2m1_decode_fixed u_decode_w (   // weights: NVFP4/E2M1 codebook
                 .idx      (w_idx),
                 .sign_in  (w_sign),
                 .sign_out (w_dec_sign),
                 .mag_q4_4 (w_dec_mag)
             );
-            gf4_decode_fixed u_decode_a (
+            gf4_decode_fixed u_decode_a (    // activations: GF4 Gaussian-quantile codebook
                 .idx      (a_idx),
                 .sign_in  (a_sign),
                 .sign_out (a_dec_sign),
-                .mag_q4_4 (a_dec_mag)
+                .mag_q1_7 (a_dec_mag)
             );
         end
     endgenerate

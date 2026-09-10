@@ -1,0 +1,158 @@
+% GF4 CV study — thesis tables. Requires \usepackage{booktabs}.
+% Table 1: quantization accuracy. Table 2: engine energy. Table 3: sparse-harvest gains.
+
+%========================= Table 1: GF4 PTQ accuracy =========================
+\begin{table}[t]
+  \centering
+  \caption{GF4 post-training quantization accuracy (\%) on CIFAR/MNIST. Weights are
+    E2M1 with per-input-channel (kernel-aligned) scaling; W4A16 keeps activations in
+    FP16, W4A4 adds GF4 activations. No fine-tuning, no Hadamard rotation.
+    Values in parentheses are the drop from FP32.}
+  \label{tab:gf4-accuracy}
+  \begin{tabular}{llrrr}
+    \toprule
+    Model & Dataset & FP32 & W4A16 & W4A4 \\
+    \midrule
+    ResNet-32   & CIFAR-10  & 93.22 & 91.29\,(-1.93) & 86.66\,(-6.56) \\
+    ResNet-56   & CIFAR-10  & 94.26 & 93.13\,(-1.13) & 91.12\,(-3.14) \\
+    VGG-19      & CIFAR-10  & 93.38 & 93.03\,(-0.35) & 92.14\,(-1.24) \\
+    DenseNet-40 & CIFAR-10  & 92.83 & 91.77\,(-1.06) & 87.62\,(-5.21) \\
+    \midrule
+    ResNet-32   & CIFAR-100 & 70.15 & 63.50\,(-6.65) & 52.23\,(-17.92) \\
+    ResNet-56   & CIFAR-100 & 72.63 & 67.02\,(-5.61) & 53.46\,(-19.17) \\
+    VGG-19      & CIFAR-100 & 73.86 & 72.29\,(-1.57) & 67.55\,(-6.31) \\
+    \midrule
+    LeNet-5     & MNIST     & 99.03 & 98.94\,(-0.09) & 98.94\,(-0.09) \\
+    LeNet-300   & MNIST     & 97.32 & 97.29\,(-0.03) & 97.29\,(-0.03) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%===================== Table 2: GF4-Engine energy =====================
+\begin{table}[t]
+  \centering
+  \caption{Dense inference energy on the GF4-Engine (256-PE weight-stationary array,
+    45\,nm), from Timeloop mapping with Accelergy energy models. Area is
+    2.39\,mm$^2$ for all workloads. ``LUT overhead'' is the GF4 codebook-decode cost
+    per MAC relative to a plain 4-bit (NVFP4) datapath.}
+  \label{tab:gf4-energy}
+  \begin{tabular}{lrrr}
+    \toprule
+    Model & MACs & Energy ($\mu$J) & pJ/MAC & LUT ovh. \\
+    \midrule
+    VGG-19      & 398.7\,M & 4327.8 & 10.86 & $+22.6\%$ \\
+    DenseNet-40 & 282.9\,M & 4244.5 & 15.00 & $+15.4\%$ \\
+    ResNet-56   & 125.8\,M & 1677.9 & 13.34 & $+17.6\%$ \\
+    ResNet-32   &  69.1\,M &  926.8 & 13.41 & $+17.5\%$ \\
+    LeNet-5     &   2.3\,M &   42.1 & 18.37 & $+12.2\%$ \\
+    LeNet-300   &   0.27\,M &  15.4 & 57.96 &  $+3.6\%$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%================= Table 3: sparse-harvest accelerator gains =================
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Sparsity-aware accelerator (Sparseloop, $256$-PE weight-stationary
+    GF4 array, $45$\,nm). Each layer is modeled as a GEMM with zero-weight
+    \emph{skipping}. Feed-forward rows model the residual sparsity remaining inside
+    the harvested compact network; residual/dense rows model the original sparse
+    network (which cannot be harvested). Energy ratio is sparse/dense at the
+    energy-optimal mapping ($<1$ is a reduction); throughput is the delay-optimal
+    dense-to-sparse cycle ratio.}
+  \label{tab:sparseloop}
+  \begin{tabular}{l c c}
+    \toprule
+    Model & Energy ratio (sparse/dense) & Throughput $\times$ \\
+    \midrule
+    VGG-19 (CIFAR-100, 98\%)  & $0.79$ & $3.68$ \\
+    VGG-19 (CIFAR-10, 99\%)   & $0.84$ & $2.65$ \\
+    VGG-19 (TinyImageNet)     & $0.67$ & $2.34$ \\
+    VGG-19 (CIFAR-10, 90\%)   & $0.92$ & $2.05$ \\
+    VGG-19 (CIFAR-100, 90\%)  & $0.94$ & $1.29$ \\
+    LeNet-5                   & $0.95$ & $2.11$ \\
+    LeNet-300                 & $0.95$ & $15.45$ \\
+    \midrule
+    ResNet-32 (CIFAR-10, 95\%)   & $0.98$ & $1.02$ \\
+    ResNet-32 (CIFAR-100, 85\%)  & $0.98$ & $1.02$ \\
+    ResNet-32 (CIFAR-10, 86\%)   & $0.97$ & $1.06$ \\
+    ResNet-32 (CIFAR-100, 86\%)  & $0.97$ & $1.06$ \\
+    ResNet-32 (TinyImageNet)     & $0.99$ & $1.12$ \\
+    DenseNet-40 (CIFAR-10)       & $0.91$ & $1.66$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%============= Table 4: GF4 vs NVFP4 activation codebook (matched clip) =============
+% Both codebooks use the SAME per-block adaptive MSE-optimal clip and block-16 scale;
+% only the 8 FP4 levels differ (GF4 = Gaussian equal-mass quantiles, NVFP4 = uniform
+% E2M1 magnitudes {0,.5,1,1.5,2,3,4,6}/6). This isolates the codebook: a naive
+% amax NVFP4 (no clip) collapses these nets to near-random, so a matched-calibration
+% baseline is the only fair comparison. All values from GF4_CV_Study/exp_codebook_ablation.py.
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Effect of the FP4 activation codebook at W4A4 (weights fixed to E2M1,
+    per-input-channel). GF4 (Gaussian equal-mass quantiles) vs NVFP4 (uniform E2M1
+    levels), both under an identical per-block adaptive clip and block-16 scale, so
+    the only difference is the 8 quantization levels. $\Delta$ is the codebook gain
+    (GF4 $-$ NVFP4). A naive amax NVFP4 with no clip collapses these networks to
+    near-random ($3$--$43\%$); the matched-clip baseline shown here is the fair
+    comparison.}
+  \label{tab:gf4-vs-nvfp4}
+  \begin{tabular}{llrrrrr}
+    \toprule
+    Model & Dataset & FP32 & W4A16 & GF4 (W4A4) & NVFP4 (W4A4) & $\Delta$ \\
+    \midrule
+    ResNet-32   & CIFAR-10  & 93.22 & 91.29 & 86.66 & 85.57 & $+1.09$ \\
+    ResNet-56   & CIFAR-10  & 94.26 & 93.13 & 91.12 & 89.46 & $+1.66$ \\
+    VGG-19      & CIFAR-10  & 93.38 & 93.03 & 92.14 & 91.43 & $+0.71$ \\
+    DenseNet-40 & CIFAR-10  & 92.83 & 91.77 & 87.62 & 86.51 & $+1.11$ \\
+    \midrule
+    ResNet-32   & CIFAR-100 & 70.15 & 63.50 & 52.23 & 49.97 & $+2.26$ \\
+    ResNet-56   & CIFAR-100 & 72.63 & 67.02 & 53.46 & 50.40 & $+3.06$ \\
+    VGG-19      & CIFAR-100 & 73.86 & 72.29 & 67.55 & 66.01 & $+1.54$ \\
+    \midrule
+    VGG-19      & TinyImageNet & 42.31 & 36.19 & 32.79 & 31.79 & $+1.00$ \\
+    ResNet-32   & TinyImageNet & 50.65 & 44.90 & 41.84 & 40.52 & $+1.32$ \\
+    \midrule
+    LeNet-5     & MNIST     & 99.04 & 99.07 & 99.09 & 99.02 & $+0.07$ \\
+    LeNet-300   & MNIST     & 97.00 & 96.71 & 96.71 & 96.71 & $+0.00$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%============= Table 5: FP4 codebook reconstruction error (interpretable) =============
+% From GF4_CV_Study/codebook_error.py. Both codebooks use the SAME per-block RMS clip
+% (clip_ratio 2.5, block 16); only the 8 levels differ. Relative RMS error is the
+% quantization noise magnitude as a fraction of the signal magnitude
+% (rel-RMS = ||x-Q(x)||/||x|| = 10^(-SNR_dB/20)) -- a direct, log-free reading of SNR.
+\begin{table}[t]
+  \centering
+  \small
+  \caption{FP4 codebook reconstruction error, reported as the quantization noise
+    relative to the signal being quantized. \emph{Rel.\ RMS} $=\lVert x-Q(x)\rVert/
+    \lVert x\rVert$ is the error magnitude as a percentage of the signal magnitude
+    (equivalently $10^{-\mathrm{SNR_{dB}}/20}$); lower is better. GF4 (Gaussian
+    equal-mass quantiles) and NVFP4 (uniform E2M1 levels) share an identical per-block
+    RMS clip and block-16 scale, so the gap is purely the codebook. The Gaussian
+    codebook helps most on well-behaved (near-Gaussian) signals and its advantage
+    nearly vanishes once heavy-tailed outliers dominate the error -- consistent with
+    the clip, not the codebook, being the primary driver at W4A4.}
+  \label{tab:gf4-codebook-error}
+  \begin{tabular}{lrrrr}
+    \toprule
+    & \multicolumn{2}{c}{Rel.\ RMS error (\%)} & Error reduction & SNR gain \\
+    \cmidrule(lr){2-3}
+    Signal & GF4 & NVFP4 & (pp) & (dB) \\
+    \midrule
+    Synthetic $\mathcal{N}(0,1)$      & 10.16 & 11.02 & $0.86$ & $+0.70$ \\
+    Gaussian $+$ outlier channels     & 26.87 & 27.00 & $0.13$ & $+0.04$ \\
+    \midrule
+    VGG-19 (CIFAR-10) weights         & 10.67 & 11.47 & $0.80$ & $+0.62$ \\
+    ResNet-32 (CIFAR-100) weights     & 11.34 & 12.01 & $0.67$ & $+0.50$ \\
+    ResNet-56 (CIFAR-100) weights     & 11.15 & 11.88 & $0.73$ & $+0.55$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

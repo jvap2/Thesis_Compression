@@ -1,0 +1,35 @@
+% Table 2: sparsity-aware accelerator (#3, Sparseloop). SKELETON.
+% VGG-19 CIFAR-100 98% is measured; the remaining rows (---) are pending the
+% overnight sweep (fill from sparse_sweep_results.txt). "Energy ratio" is
+% sparse/dense at the energy-optimal mapping (<1 = a reduction); "Throughput"
+% is the delay-optimal dense/sparse cycle ratio (>1 = a speed-up).
+\begin{table}[t]
+  \centering
+  \small
+  \caption{Sparsity-aware accelerator (Sparseloop, $256$-PE weight-stationary
+    GF4 array, $45$\,nm). Each layer is modeled as a GEMM with zero-weight
+    \emph{skipping}. Feed-forward rows model the residual sparsity remaining inside
+    the harvested compact network; residual/dense rows model the original sparse
+    network (which cannot be harvested). Energy ratio is sparse/dense at the
+    energy-optimal mapping ($<1$ is a reduction); throughput is the delay-optimal
+    dense-to-sparse cycle ratio.}
+  \label{tab:sparseloop}
+  \begin{tabular}{l c c}
+    \toprule
+    Model & Energy ratio (sparse/dense) & Throughput $\times$ \\
+    \midrule
+    VGG-19 (CIFAR-100, 98\%)  & $0.79$ & $3.68$ \\
+    VGG-19 (CIFAR-10, 99\%)   & ---    & ---    \\
+    VGG-19 (TinyImageNet)     & ---    & ---    \\
+    LeNet-5                   & ---    & ---    \\
+    LeNet-300                 & ---    & ---    \\
+    \midrule
+    ResNet-32 (CIFAR-10, 95\%)   & ---    & ---    \\
+    ResNet-32 (CIFAR-100, 85\%)  & ---    & ---    \\
+    ResNet-32 (CIFAR-10, 86\%)   & ---    & ---    \\
+    ResNet-32 (CIFAR-100, 86\%)  & ---    & ---    \\
+    ResNet-32 (TinyImageNet)     & ---    & ---    \\
+    DenseNet-40 (CIFAR-10)       & ---    & ---    \\
+    \bottomrule
+  \end{tabular}
+\end{table}

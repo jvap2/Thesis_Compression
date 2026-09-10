@@ -1,0 +1,37 @@
+% ---------------------------------------------------------------------------
+% tab:regularity -- GF4 codebook regularity: accuracy (WikiText-2 PPL, OPT-125M,
+% A-only GF4 under blockwise Hadamard) vs. decode-ROM area (Yosys/Nangate45).
+% Each codebook snaps the GF4 Gaussian-quantile levels to a Q1.B fixed-point
+% grid (or nearest power of two); coarser grids synthesize to a smaller decode
+% but eventually collapse levels and wreck accuracy. Q1.4 is the knee: 40% less
+% decode area for +0.03 PPL. Source: CUDA_FP4_Test/gf4_regularity_sweep.py,
+% rtl_prototype/gf4_decode_area_sweep.py; figure gf4_regularity_pareto.png.
+% ---------------------------------------------------------------------------
+\begin{table}[t]
+  \centering
+  \caption{GF4 codebook regularity: accuracy vs.\ decode-ROM area. Levels are
+  snapped to a Q1.$B$ fixed-point grid (or to the nearest power of two); coarser
+  grids make the decode constants more regular --- fewer significant bits, a
+  smaller synthesized mux/ROM --- but eventually collapse distinct levels.
+  Accuracy is WikiText-2 perplexity on OPT-125M with activations GF4-quantized
+  under a blockwise Hadamard rotation (weights fp16); decode area is the
+  \texttt{gf4\_decode\_fixed} ROM synthesized with Yosys against Nangate45. The
+  fp16 baseline is $29.52$. Q1.4 is the knee: $40\%$ less decode area for
+  $+0.03$ PPL, while power-of-two snapping saves more area but collapses to six
+  levels and costs $+13$ PPL --- so the accuracy-optimal codebook is mildly
+  regularized (Q1.4--Q1.5), not power-of-two.}
+  \label{tab:regularity}
+  \small
+  \begin{tabular}{lccrr}
+    \toprule
+    Codebook & Distinct & Decode area & Area & $\Delta$PPL \\
+             & levels   & ($\mu$m$^2$) & savings & vs.\ exact \\
+    \midrule
+    exact GF4 (Q1.7) & 8 & $15.16$ & ---       & $0.00$ \\
+    Q1.5             & 8 & $12.50$ & $17.5\%$   & $+0.12$ \\
+    \textbf{Q1.4}    & \textbf{8} & $\mathbf{9.04}$ & $\mathbf{40.4\%}$ & $\mathbf{+0.03}$ \\
+    Q1.3             & 7 & $8.51$  & $43.9\%$   & $+0.54$ \\
+    pow2             & 6 & $7.18$  & $52.6\%$   & $+12.98$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

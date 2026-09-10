@@ -1,0 +1,34 @@
+# Compound component: a FAITHFUL NVFP4 baseline MAC — hardwired E2M1, no LUT,
+# modeled with the Aladdin fpmac primitive at E2M1 (exponent 2, mantissa 1)
+# rather than an int4 proxy. Pair with gf4_real (fpmac fp16) for the honest
+# realistic comparison: both are floating-point MACs, differing only in format
+# width, so (gf4_real - nvfp4_e2m1) is the true wider-multiply + decode cost.
+compound_components:
+  version: 0.3
+  classes:
+    - name: fp4_e2m1_mac
+      attributes:
+        technology: "45nm"
+        datawidth: 4
+      subcomponents:
+        - name: mac
+          class: fpmac
+          attributes:
+            exponent: 2          # E2M1 = 1 sign + 2 exponent + 1 mantissa (native NVFP4)
+            mantissa: 1
+      actions:
+        - name: mac_random
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_random}
+        - name: mac_gated
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: mac_gated}
+        - name: idle
+          subcomponents:
+            - name: mac
+              actions:
+                - {name: idle}

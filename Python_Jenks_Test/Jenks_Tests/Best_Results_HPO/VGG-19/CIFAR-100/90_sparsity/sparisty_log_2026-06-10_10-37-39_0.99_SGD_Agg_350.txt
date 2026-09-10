@@ -1,0 +1,2 @@
+Epoch: 280| Sparsity:  0.89401
+Epoch: 350| Sparsity:  0.89401

@@ -1,0 +1,46 @@
+{
+  "model": "cv_lenet5",
+  "source": "dense",
+  "input_hw": 28,
+  "note": "conv/linear as GEMM: C=Cin*R*S, K=Cout, N=P*Q; density=1 (dense, GF4 precision study)",
+  "shapes": [
+    {
+      "name": "L0",
+      "K": 25,
+      "N": 20,
+      "batchN": 576,
+      "count": 1,
+      "density": 1.0,
+      "macs": 288000
+    },
+    {
+      "name": "L1",
+      "K": 500,
+      "N": 50,
+      "batchN": 64,
+      "count": 1,
+      "density": 1.0,
+      "macs": 1600000
+    },
+    {
+      "name": "L2",
+      "K": 800,
+      "N": 500,
+      "batchN": 1,
+      "count": 1,
+      "density": 1.0,
+      "macs": 400000
+    },
+    {
+      "name": "L3",
+      "K": 500,
+      "N": 10,
+      "batchN": 1,
+      "count": 1,
+      "density": 1.0,
+      "macs": 5000
+    }
+  ],
+  "total_macs": 2293000,
+  "effective_macs_sparse": 2293000
+}

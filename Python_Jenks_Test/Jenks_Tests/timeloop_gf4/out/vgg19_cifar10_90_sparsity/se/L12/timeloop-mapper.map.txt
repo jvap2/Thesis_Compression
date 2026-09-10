@@ -1,0 +1,21 @@
+DRAM [ Weights:1823346 (1823346) Inputs:17964 (17964) Outputs:1624 (1624) ] 
+---------------------------------------------------------------------------
+| for C in [0:3)
+|   for K in [0:7)
+
+global_buffer [ Inputs:5988 (5988) ] 
+weight_reg [ ] 
+--------------
+|     for K in [0:29)
+|       for C in [0:499)
+
+input_reg [ Weights:6 (6) Outputs:8 (8) ] 
+-----------------------------------------
+|         for C in [0:3)
+|           for N in [0:2)
+|             for K in [0:2)
+
+psum_reg [ Inputs:2 (2) ] 
+-------------------------
+|               for N in [0:2)
+|                 << Compute >>

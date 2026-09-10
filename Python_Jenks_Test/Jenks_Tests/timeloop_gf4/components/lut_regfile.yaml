@@ -23,9 +23,9 @@ compound_components:
             width: 4
             datawidth: 4
         - name: lut
-          class: regfile          # 16x8b codebook decode
+          class: regfile          # 8x8b symmetric magnitude codebook (sign applied at MAC)
           attributes:
-            depth: 16
+            depth: 8
             width: 8
             datawidth: 8
       actions:

@@ -1439,11 +1439,12 @@ def train_val_loop_global(model, train_dataloader, val_dataloader, optimizer, lo
         print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f) 
 
 
-def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy, writer, device, experiment_name, model_name, timestamp, 
+def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy, writer, device, experiment_name, model_name, timestamp,
                    train_filename, val_filename, log_filename, sparsity_filename, prune_filename, debug_filename, jenks_filename,
                    prune_count=0, one_update=False, EPOCHS=100, sparsity=0.0,
                    prune_epoch_list=None, prune_epoch=0, prune_between=1, prune_ratio=0.5, one_shot=False, mask=True,
-                   mag_prune=False, bias_prune=False, kill_velocity=False, l2=0.0, lambda_=0.0, warmup_epochs=0, min_epochs=1, elem_bias = False, accum_steps=1, weight_reset=False):
+                   mag_prune=False, bias_prune=False, kill_velocity=False, l2=0.0, lambda_=0.0, warmup_epochs=0, min_epochs=1, elem_bias = False, accum_steps=1, weight_reset=False,
+                   use_ema=False, ema_decay=0.95, rewind_at_freeze=False):
     no_jenks =False
     l2 = True
     mag_prune = True
@@ -1456,6 +1457,16 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
     print(f"Prune epoch: {prune_epoch}")
     print(f"Prune between: {prune_between}")
     max_val_acc = 0.0
+    # Tier-1 EMA: epoch-granularity weight averaging (params + BN buffers). Opt-in.
+    if use_ema:
+        ema = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+        max_ema_val_acc = 0.0
+        # EMA must average over a STABLE (frozen) mask. One-shot freezes at prune_epoch;
+        # iterative freezes when sparsity first reaches prune_ratio (pruning then stops).
+        # Track that epoch and (re)seed the EMA buffer there so no mask-churn epoch enters
+        # the running average. Until then EMA does not accumulate or get harvested.
+        ema_frozen_epoch = prune_epoch if one_shot else None
+        print(f"EMA enabled (decay={ema_decay}); frozen-mask start epoch = {ema_frozen_epoch}")
     while (sparsity < prune_ratio and epoch<EPOCHS) or epoch<=min_epochs:    # Training loop
         print("Epoch: ", epoch)
         epoch += 1
@@ -1468,8 +1479,8 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
         train_top5acc = 0.0
         start = time()
         print(f"Memory free: {get_memory_free_MiB(0)} MiB")
-        if sparsity >= prune_ratio:
-            no_jenks = True
+        if sparsity >= prune_ratio or (one_shot and epoch > prune_epoch):
+            no_jenks = True   # Jenks off after the one-shot prune (saliency shaping only pre-prune)
         if epoch == prune_epoch or (epoch>prune_epoch and (epoch-prune_epoch) % prune_between==0):
             # if kill_velocity and epoch==prune_epoch:
             #     Prune_Score(optimizer, kill_velocity=True)
@@ -1499,6 +1510,18 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
             sparsity = 1 - non_zero_params / total_params
             with open(sparsity_filename,"a") as f:
                 print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f)
+            # Late-EMA freeze detection (iterative path): once the target sparsity is reached
+            # pruning stops and the mask is fixed for the rest of training. Seed EMA here.
+            if use_ema and (not one_shot) and ema_frozen_epoch is None and sparsity >= prune_ratio:
+                ema_frozen_epoch = epoch
+                ema = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+                print(f"EMA: mask frozen at epoch {epoch} (sparsity {float(sparsity): .5f}); EMA buffer reseeded on frozen mask")
+                # Late warm-restart tied to the (dynamic) freeze epoch: by now the auto-Jenks LR
+                # has decayed far down, leaving the frozen sparse net no headroom to recover. Reset
+                # the LR/WD accumulators to init so the schedule re-anneals over the frozen-mask tail.
+                if rewind_at_freeze and hasattr(scheduler, "reset_accumulators"):
+                    scheduler.reset_accumulators()
+                    print(f"Late LR/WD rewind at freeze (epoch {epoch}): scheduler accumulators reset to init")
         if one_update:
             count +=1
             torch.cuda.empty_cache()
@@ -1546,6 +1569,18 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
         scheduler.step()
         with open (log_filename,"a") as f:
             print(f"Epoch: {epoch}| Learning Rate: {scheduler.get_last_lr()}", file=f)
+        if use_ema and ema_frozen_epoch is not None and epoch > ema_frozen_epoch:
+            _msd = model.state_dict()
+            for _k in ema:
+                _v = _msd[_k]
+                if _v.dtype.is_floating_point:
+                    ema[_k].mul_(ema_decay).add_(_v.detach().float(), alpha=1.0-ema_decay)
+                else:
+                    ema[_k].copy_(_v)
+            if mask:
+                for _n, _pp in model.named_parameters():
+                    if _n in ema and _pp in optimizer.state and 'mask' in optimizer.state[_pp]:
+                        ema[_n].mul_(optimizer.state[_pp]['mask'].float())
         # if epoch == warmup_epochs:
         #     '''Change the learning rate to the base value'''
         #     for group in optimizer.param_groups:
@@ -1574,9 +1609,30 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
                 val_acc += acc
                 with open(val_filename,"a") as f:
                     print(f"Iteration: {count_val}| Loss: {val_loss/count_val: .5f}| Acc: {val_acc/count_val: .5f} | Top 5 Acc {val_top5acc/count_val}", file=f)
-            if val_acc/count_val > max_val_acc and epoch>prune_epoch:
+            # Track the plain best only once the mask is at its final (frozen) sparsity, so the
+            # reported/saved best is a genuine final-sparsity checkpoint and NOT a mid-churn,
+            # lower-sparsity peak. Non-EMA callers keep the legacy epoch>prune_epoch behavior.
+            _track_ok = (ema_frozen_epoch is not None and epoch > ema_frozen_epoch) if use_ema else (epoch > prune_epoch)
+            if val_acc/count_val > max_val_acc and _track_ok:
                 max_val_acc = val_acc/count_val
                 torch.save(model.state_dict(), f"models/best_{timestamp}_{experiment_name}_{model_name}.pth")
+            # EMA is evaluated on its OWN schedule (every epoch after the freeze), independent of
+            # whether plain set a new best. The frozen-mask tail is exactly where EMA's variance
+            # reduction pays off, and plain may never beat its pre-freeze (lower-sparsity) peak.
+            if use_ema and ema_frozen_epoch is not None and epoch>ema_frozen_epoch:
+                _bak = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                model.load_state_dict({k: ema[k].to(_bak[k].dtype) for k in ema})
+                _eacc, _ec = 0.0, 0
+                for Xe, ye in val_dataloader:
+                    Xe, ye = Xe.to(device), ye.to(device)
+                    _eacc += (model(Xe).argmax(1) == ye).float().mean(); _ec += 1
+                _eacc = _eacc/_ec
+                with open(val_filename,"a") as f:
+                    print(f"Epoch: {epoch}| EMA Val Acc: {_eacc: .5f}", file=f)
+                if _eacc > max_ema_val_acc:
+                    max_ema_val_acc = _eacc
+                    torch.save(model.state_dict(), f"models/best_ema_{timestamp}_{experiment_name}_{model_name}.pth")
+                model.load_state_dict(_bak)
         writer.add_scalars(main_tag="Loss", tag_scalar_dict={"train/loss": train_loss, "val/loss": val_loss}, global_step=epoch)
         writer.add_scalars(main_tag="Accuracy", tag_scalar_dict={"train/acc": train_acc, "val/acc": val_acc}, global_step=epoch)
         with open("LeNet300_100_MNIST_output/output_(1).txt","a") as f:
@@ -1595,3 +1651,5 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
         print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f)
     with open(val_filename,"a") as f:
         print(f"Best validation accuracy achieved: {max_val_acc: .5f}", file=f)
+        if use_ema:
+            print(f"Best EMA validation accuracy achieved: {max_ema_val_acc: .5f}", file=f)
