@@ -45,6 +45,10 @@ void launch_gf4_fused_gemv(const uint8_t* d_Wc, const __half* d_Wa,
 void launch_gf4_lattice_gemv(const uint8_t* d_Wc, const __half* d_Wa,
                              const __half* d_x, __half* d_y, int M, int K,
                              const float* d_bias_correction, cudaStream_t stream);
+void launch_gf4_lattice_gemv_batched(const uint8_t* d_Wc, const __half* d_Wa,
+                                      const __half* d_x, __half* d_y,
+                                      int M, int K, int bs,
+                                      const float* d_bc, cudaStream_t stream);
 void launch_gf4_naive_gemv(const uint8_t* d_Wc, const __half* d_Wa,
                            __half* d_Wdequant_scratch, const __half* d_x, __half* d_y,
                            int M, int K, const float* d_bias_correction, cudaStream_t stream);
@@ -323,6 +327,36 @@ torch::Tensor gf4_lattice_gemv(torch::Tensor W_codes, torch::Tensor W_alpha,
     return y;
 }
 
+// Batched lattice GEMV (opt-2 + opt-3): x is [bs, K], returns y [bs, M].
+// Loads W once per bs tokens (instead of bs separate kernel launches).
+// Automatically tiles bs into the largest chunk that fits the 47 KB smem budget.
+torch::Tensor gf4_lattice_gemv_batched(torch::Tensor W_codes, torch::Tensor W_alpha,
+                                        torch::Tensor x, int64_t K, int64_t bs,
+                                        torch::Tensor bias_correction) {
+    CHECK_CUDA(W_codes); CHECK_CUDA(W_alpha); CHECK_CUDA(x);
+    CHECK_CONTIG(W_codes); CHECK_CONTIG(W_alpha); CHECK_CONTIG(x);
+    TORCH_CHECK(W_codes.dtype() == torch::kUInt8, "W_codes must be uint8");
+    TORCH_CHECK(W_alpha.dtype() == torch::kFloat16, "W_alpha must be fp16");
+    TORCH_CHECK(x.dtype() == torch::kFloat16, "x must be fp16");
+    TORCH_CHECK(x.numel() == bs * K, "x must have bs*K elements");
+    int M = W_codes.size(0);
+    auto y = torch::empty({bs, M}, x.options());
+    const float* bc_ptr = nullptr;
+    if (bias_correction.numel() > 0) {
+        CHECK_CUDA(bias_correction); CHECK_CONTIG(bias_correction);
+        TORCH_CHECK(bias_correction.dtype() == torch::kFloat32, "bias_correction must be fp32");
+        TORCH_CHECK(bias_correction.numel() == M, "bias_correction must have M elements");
+        bc_ptr = bias_correction.data_ptr<float>();
+    }
+    launch_gf4_lattice_gemv_batched(
+        W_codes.data_ptr<uint8_t>(),
+        reinterpret_cast<const __half*>(W_alpha.data_ptr<at::Half>()),
+        reinterpret_cast<const __half*>(x.data_ptr<at::Half>()),
+        reinterpret_cast<__half*>(y.data_ptr<at::Half>()),
+        M, (int)K, (int)bs, bc_ptr, at::cuda::getCurrentCUDAStream());
+    return y;
+}
+
 torch::Tensor gf4_naive_gemv(torch::Tensor W_codes, torch::Tensor W_alpha,
                              torch::Tensor x, int64_t K, torch::Tensor bias_correction) {
     CHECK_CUDA(W_codes); CHECK_CUDA(W_alpha); CHECK_CUDA(x);
@@ -445,6 +479,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("bias_correction") = torch::empty({0}));
     m.def("gf4_lattice_gemv", &gf4_lattice_gemv, "Fused GEMV, shift-and-add decode (opt lattice codebook)",
           py::arg("W_codes"), py::arg("W_alpha"), py::arg("x"), py::arg("K"),
+          py::arg("bias_correction") = torch::empty({0}));
+    m.def("gf4_lattice_gemv_batched", &gf4_lattice_gemv_batched,
+          "Batched lattice GEMV: x=[bs,K], y=[bs,M]; loads W once across all bs tokens",
+          py::arg("W_codes"), py::arg("W_alpha"), py::arg("x"), py::arg("K"), py::arg("bs"),
           py::arg("bias_correction") = torch::empty({0}));
     m.def("gf4_fused_gemv", &gf4_fused_gemv, "Fused GF4-dequant + GEMV (no materialized W; 8-entry LUT)",
           py::arg("W_codes"), py::arg("W_alpha"), py::arg("x"), py::arg("K"),

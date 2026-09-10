@@ -160,9 +160,13 @@ __global__ void gf4_fused_lattice_gemv_kernel(const uint8_t* __restrict__ W_code
                                               __half* __restrict__ y,
                                               int M, int K,
                                               const float* __restrict__ bias_correction) {
-    extern __shared__ __half x_sh[];
+    // Opt-3: x staged as float (convert once at load, use directly in FMAs).
+    // smem = K*4 bytes: K=4096->16KB, K=11008->43KB, both fit in 48KB budget.
+    // Named x_shf (not x_sh) to avoid extern __shared__ type conflict with
+    // gf4_fused_wonly_gemv_kernel which declares x_sh as __half in same TU.
+    extern __shared__ float x_shf[];
     const int tid = threadIdx.x, threads = blockDim.x;
-    for (int k = tid; k < K; k += threads) x_sh[k] = x[k];
+    for (int k = tid; k < K; k += threads) x_shf[k] = __half2float(x[k]);
     __syncthreads();
     const int warp = tid / 32, lane = tid & 31;
     const int row = blockIdx.x * GEMV_ROWS_PER_BLOCK + warp;
@@ -185,7 +189,7 @@ __global__ void gf4_fused_lattice_gemv_kernel(const uint8_t* __restrict__ W_code
                 const int k = k0 + wi * 8 + j * 2;
                 const float w0 = lattice_decode_one(byte & 0xF) * a;
                 const float w1 = lattice_decode_one((byte >> 4) & 0xF) * a;
-                acc += w0 * __half2float(x_sh[k]) + w1 * __half2float(x_sh[k + 1]);
+                acc += w0 * x_shf[k] + w1 * x_shf[k + 1];
             }
         }
     }
@@ -202,8 +206,130 @@ void launch_gf4_lattice_gemv(const uint8_t* d_Wc, const __half* d_Wa,
                              const float* d_bias_correction, cudaStream_t stream) {
     dim3 block(GEMV_ROWS_PER_BLOCK * 32);
     dim3 grid((M + GEMV_ROWS_PER_BLOCK - 1) / GEMV_ROWS_PER_BLOCK);
-    size_t smem = (size_t)K * sizeof(__half);
+    size_t smem = (size_t)K * sizeof(float);   // float staging (opt-3)
     gf4_fused_lattice_gemv_kernel<<<grid, block, smem, stream>>>(d_Wc, d_Wa, d_x, d_y, M, K, d_bias_correction);
+}
+
+// ---------------------------------------------------------------------------
+// 1c. Batched lattice GEMV (opt-2): one warp handles one W-row and accumulates
+// BS separate dot products simultaneously, loading W once from HBM instead of
+// BS separate kernel launches each re-reading W.
+//
+// x layout: [BS, K] row-major (BS tokens stacked). Each token's K halves are
+// staged into shared memory at launch, then the inner decode loop accumulates
+// into BS independent float registers. Smem = BS*K*sizeof(__half).
+//
+// Smem budget (48 KB): BS=2,K=11008->44KB OK; BS=4,K=4096->32KB OK;
+// BS=4,K=11008->88KB exceeds budget (launcher splits into two BS=2 calls).
+// BS=8 available for K<=3000 (K=4096->64KB overflows; launcher uses BS=4 pairs).
+//
+// Bank conflicts: consecutive b-values at the same k share a bank (stride K is
+// a multiple of 32 for K>=4096). This is BS-way broadcast (read-only smem
+// access is conflict-free on Ampere+), so no real penalty on sm86/sm89.
+// ---------------------------------------------------------------------------
+template<int BS>
+__global__ void gf4_lattice_gemv_batched_kernel(const uint8_t* __restrict__ W_codes,
+                                                const __half*  __restrict__ W_alpha,
+                                                const __half*  __restrict__ x,   // [BS, K]
+                                                __half*        __restrict__ y,   // [BS, M]
+                                                int M, int K,
+                                                const float*   __restrict__ bias_correction) {
+    extern __shared__ __half x_bsh[];   // [BS, K] halves
+    const int tid = threadIdx.x, threads = blockDim.x;
+#pragma unroll
+    for (int b = 0; b < BS; b++)
+        for (int k = tid; k < K; k += threads)
+            x_bsh[(size_t)b * K + k] = x[(size_t)b * K + k];
+    __syncthreads();
+
+    const int warp = tid / 32, lane = tid & 31;
+    const int row = blockIdx.x * GEMV_ROWS_PER_BLOCK + warp;
+    if (row >= M) return;
+
+    const int vecs_per_row = K / GF4_BLOCK;
+    const uint4* row_codes4 = reinterpret_cast<const uint4*>(W_codes + (size_t)row * (K / 2));
+    const __half* row_alpha = W_alpha + (size_t)row * vecs_per_row;
+
+    float acc[BS] = {};
+
+    for (int v = lane; v < vecs_per_row; v += 32) {
+        uint4 p = row_codes4[v];
+        const int k0 = v * GF4_BLOCK;
+        const float a = __half2float(row_alpha[v]);
+        const uint32_t words[4] = {p.x, p.y, p.z, p.w};
+#pragma unroll
+        for (int wi = 0; wi < 4; ++wi) {
+            const uint32_t word = words[wi];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const uint8_t byte = (word >> (8 * j)) & 0xFF;
+                const int k = k0 + wi * 8 + j * 2;
+                const float w0 = lattice_decode_one(byte & 0xF) * a;
+                const float w1 = lattice_decode_one((byte >> 4) & 0xF) * a;
+#pragma unroll
+                for (int b = 0; b < BS; b++) {
+                    acc[b] += w0 * __half2float(x_bsh[(size_t)b * K + k])
+                            + w1 * __half2float(x_bsh[(size_t)b * K + k + 1]);
+                }
+            }
+        }
+    }
+
+    const float bc = (bias_correction != nullptr) ? bias_correction[row] : 0.0f;
+#pragma unroll
+    for (int b = 0; b < BS; b++) {
+#pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            acc[b] += __shfl_xor_sync(0xFFFFFFFF, acc[b], offset);
+        if (lane == 0)
+            y[(size_t)b * M + row] = __float2half(acc[b] + bc);
+    }
+}
+
+// Dispatch one chunk of bs_chunk tokens (must be 1, 2, 4, or 8).
+static void _dispatch_lattice_batched(const uint8_t* Wc, const __half* Wa,
+                                       const __half* x, __half* y,
+                                       int M, int K, int bs_chunk,
+                                       const float* bc, cudaStream_t stream) {
+    dim3 block(GEMV_ROWS_PER_BLOCK * 32);
+    dim3 grid((M + GEMV_ROWS_PER_BLOCK - 1) / GEMV_ROWS_PER_BLOCK);
+    if (bs_chunk == 1) {
+        size_t smem = (size_t)K * sizeof(float);
+        gf4_fused_lattice_gemv_kernel<<<grid, block, smem, stream>>>(Wc, Wa, x, y, M, K, bc);
+    } else {
+        size_t smem = (size_t)bs_chunk * K * sizeof(__half);
+        switch (bs_chunk) {
+            case 2: gf4_lattice_gemv_batched_kernel<2><<<grid, block, smem, stream>>>(Wc, Wa, x, y, M, K, bc); break;
+            case 4: gf4_lattice_gemv_batched_kernel<4><<<grid, block, smem, stream>>>(Wc, Wa, x, y, M, K, bc); break;
+            case 8: gf4_lattice_gemv_batched_kernel<8><<<grid, block, smem, stream>>>(Wc, Wa, x, y, M, K, bc); break;
+        }
+    }
+}
+
+// Launch batched lattice GEMV for arbitrary bs. Automatically picks the largest
+// BS template (8/4/2/1) that keeps smem under 47 KB, then tiles over bs.
+void launch_gf4_lattice_gemv_batched(const uint8_t* d_Wc, const __half* d_Wa,
+                                      const __half* d_x, __half* d_y,
+                                      int M, int K, int bs,
+                                      const float* d_bc, cudaStream_t stream) {
+    const size_t smem_limit = 47 * 1024;
+    // Largest chunk size that fits smem budget
+    int max_chunk = 1;
+    for (int c : {8, 4, 2}) {
+        if ((size_t)c * K * sizeof(__half) <= smem_limit) { max_chunk = c; break; }
+    }
+    int b = 0;
+    while (b < bs) {
+        int rem = bs - b;
+        int chunk = (rem >= max_chunk) ? max_chunk : (rem >= 4 ? 4 : (rem >= 2 ? 2 : 1));
+        // clamp chunk to largest template that fits smem
+        while (chunk > 1 && (size_t)chunk * K * sizeof(__half) > smem_limit) chunk >>= 1;
+        _dispatch_lattice_batched(d_Wc, d_Wa,
+                                   d_x + (size_t)b * K,
+                                   d_y + (size_t)b * M,
+                                   M, K, chunk, d_bc, stream);
+        b += chunk;
+    }
 }
 
 // ---------------------------------------------------------------------------
