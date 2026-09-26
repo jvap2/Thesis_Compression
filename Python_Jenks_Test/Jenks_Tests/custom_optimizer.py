@@ -1128,7 +1128,7 @@ def train_one_step_prune_v2_ETF(net, dataloader, optimizer, criterion, epoch, wa
                                 # debug_logs.append(
                                 #     f"Layer Name: {name}\nPercent Pruned: {stats['percent_pruned']:.4f}\nSaliency Std: {stats['saliency_std']:.4f}\n"
                                 # )
-                                if isinstance(GVF[name],list):
+                                if isinstance(GVF[name],list) or (torch.is_tensor(GVF[name]) and GVF[name].numel() > 1):
                                     debug_logs.append(f"Layer Name: {name}\nGVF Values: {GVF[name]}\n")
                                 else:
                                     debug_logs.append(f"Layer Name: {name}\nGVF Value: {GVF[name]:.4f}\n")
@@ -2458,7 +2458,7 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
                                 # debug_logs.append(
                                 #     f"Layer Name: {name}\nPercent Pruned: {stats['percent_pruned']:.4f}\nSaliency Std: {stats['saliency_std']:.4f}\n"
                                 # )
-                                if isinstance(GVF[name],list):
+                                if isinstance(GVF[name],list) or (torch.is_tensor(GVF[name]) and GVF[name].numel() > 1):
                                     debug_logs.append(f"Layer Name: {name}\nGVF Values: {GVF[name]}\n")
                                 else:
                                     debug_logs.append(f"Layer Name: {name}\nGVF Value: {GVF[name]:.4f}\n")
@@ -2571,8 +2571,6 @@ class ElementwiseMomentumSGD(Optimizer):
                         # print(WB.shape)
                         ## Generate a binary matrix, b_ij = 1 if sign_WB_ij<0 else 0
                         ## This will help us identify which weights to prune
-                        decay_mask = torch.ones_like(WB, requires_grad=False)
-                        decay_mask[sign_WB > 0] = 0
                         if 'bn' not in self.name_map[param] and not _protect_shortcut(self.name_map[param]):
                             mask_tensor, GVF_val = compute_mask(param, WB, self.filter_based, self.bias_prune)
                         else:
@@ -2583,17 +2581,18 @@ class ElementwiseMomentumSGD(Optimizer):
                         #  per layer per step that serialized the optimizer loop. Values are unaffected;
                         #  torch tracks the mask_tensor dependency without a manual barrier.)
                         mask_tensor = mask_tensor.to(self.device)
-                        decay_mask = decay_mask.to(self.device)
-                        decay_mask *= mask_tensor
+                        # (decay_mask removed: dead in this branch -- only the commented-out momentum_buffer
+                        #  lines below referenced it -- and it cost a nonzero + index_put per layer per step)
                         ## If there is a zero in the mask tensor, then the beta is equal to (1-\sqrt{lr*weight_decay})^2
                         ## OTherwise, beta = (1-\sqrt{lr*h})^2 where h is an approximation of the curvature
                         ## h = ||param.grad||^2_2
                         eig_hess = torch.norm(param.grad*mask_tensor)**2
                         unsal_beta = (1 - torch.sqrt(lr_t * wd_t))**2
                         sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
-                        beta_tensor = torch.ones_like(mask_tensor, requires_grad=False)
-                        beta_tensor[mask_tensor==1] = sal_beta
-                        beta_tensor[mask_tensor==0] = unsal_beta
+                        # beta = sal_beta where mask==1, unsal_beta where mask==0. mask is exactly 0/1, so this
+                        # arithmetic form is identical in value but avoids the per-layer boolean-index
+                        # (nonzero + index_put) launches/syncs. Momentum coefficient unchanged.
+                        beta_tensor = unsal_beta + mask_tensor * (sal_beta - unsal_beta)
                         param.grad.mul_(mask_tensor)
                         update = weight_decay * param.data + param.grad
                         if 'velocity' not in self.state[param]:

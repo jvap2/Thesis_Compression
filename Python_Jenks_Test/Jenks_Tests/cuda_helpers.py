@@ -389,7 +389,7 @@ def Conv_Mask(weights_cuda):
     arr = vectorized_filter_mask(indices_flatten, min_indices)
     arr = arr.view(B, C, H, W)
     del weights_sorted, indices, min_indices, min_values
-    return arr, GVF.cpu().detach().numpy().tolist()
+    return arr, GVF.detach()   # SYNC-FREE: was GVF.cpu().numpy().tolist() -> a DtoH sync per conv layer
 
 # Pure-torch O(N) prefix-sum Jenks: replaces the O(N^2) jenks_optimization_*cuda kernels used by
 # Linear_Mask/Bias_Mask (called per layer, every step, over the WHOLE flattened layer when
@@ -423,18 +423,18 @@ def Linear_Mask(weights_cuda):
     weights_cuda_sorted = weights_cuda_sorted.view(weights_cuda.shape)
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
     var = torch_jenks_var(weights_cuda_sorted) if USE_TORCH_JENKS else module_weights.jenks_optimization_cuda(weights_cuda_sorted)
-    var_min = var.argmin().item()
+    # SYNC-FREE: keep var_min on the GPU (no .item()) so the CPU can launch all layers' mask ops
+    # without stalling -> the GPU pipelines them (was ~54 serial per-layer syncs/step).
+    n = weights_cuda_flatten.numel()
+    var_min = var.argmin()
     if OVER_PRUNE > 0:
-        n = weights_cuda_flatten.numel()
-        var_min = min(var_min + int(OVER_PRUNE * (n - var_min)), n - 1)
-    # Print the output
-    ones = weights_cuda_indices[var_min:]
-    arr = torch.zeros(weights_cuda_flatten.shape, device=weights_cuda.device)  # on-device: avoid CPU alloc + H2D copy each layer
-    arr[ones] = 1
-    arr = arr.reshape(weights_cuda.shape)
-    GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # Avoid division by zero
-    del weights_cuda_sorted, weights_cuda_indices, var, ones
-    return arr, GVF.item()
+        var_min = torch.minimum(var_min + (OVER_PRUNE * (n - var_min)).to(var_min.dtype),
+                                var_min.new_tensor(n - 1))
+    # keep sorted positions [var_min:], scattered back to original order == indices[var_min:] (identical)
+    keep = (torch.arange(n, device=weights_cuda.device) >= var_min).to(weights_cuda.dtype)
+    arr = torch.zeros(n, device=weights_cuda.device).scatter_(0, weights_cuda_indices, keep).reshape(weights_cuda.shape)
+    GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # GPU scalar; GVF is diagnostic-only downstream
+    return arr, GVF.detach()
 
 def Bias_Mask(weights_cuda):
     weights_cuda_sorted, weights_cuda_indices = weights_cuda.sort()
@@ -442,18 +442,16 @@ def Bias_Mask(weights_cuda):
     SSD_total = ((weights_cuda_sorted - mean) ** 2).sum()
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
     var = torch_jenks_var(weights_cuda_sorted) if USE_TORCH_JENKS else module_bias.jenks_optimization_biases_cuda(weights_cuda_sorted)
-    var_min = var.argmin().item()
+    # SYNC-FREE: var_min stays on the GPU (no .item()); mask built by scatter to preserve indices[var_min:]
+    n = weights_cuda.numel()
+    var_min = var.argmin()
     if OVER_PRUNE > 0:
-        n = weights_cuda.numel()
-        var_min = min(var_min + int(OVER_PRUNE * (n - var_min)), n - 1)
-    # Print the output
-    # zeros = weights_cuda_indices[:var_min]
-    ones = weights_cuda_indices[var_min:]
-    arr = torch.zeros(weights_cuda.shape, device=weights_cuda.device)  # on-device: avoid CPU alloc + H2D copy each layer
-    arr[ones] = 1
-    GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # Avoid division by zero
-    del weights_cuda_sorted, weights_cuda_indices, var, ones
-    return arr, GVF.item()
+        var_min = torch.minimum(var_min + (OVER_PRUNE * (n - var_min)).to(var_min.dtype),
+                                var_min.new_tensor(n - 1))
+    keep = (torch.arange(n, device=weights_cuda.device) >= var_min).to(weights_cuda.dtype)
+    arr = torch.zeros(n, device=weights_cuda.device).scatter_(0, weights_cuda_indices, keep).reshape(weights_cuda.shape)
+    GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # GPU scalar; GVF is diagnostic-only downstream
+    return arr, GVF.detach()
 
 
 # WB = torch.rand(4, 5)
