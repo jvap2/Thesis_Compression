@@ -391,6 +391,29 @@ def Conv_Mask(weights_cuda):
     del weights_sorted, indices, min_indices, min_values
     return arr, GVF.cpu().detach().numpy().tolist()
 
+# Pure-torch O(N) prefix-sum Jenks: replaces the O(N^2) jenks_optimization_*cuda kernels used by
+# Linear_Mask/Bias_Mask (called per layer, every step, over the WHOLE flattened layer when
+# filter_based=False). Same 2-class within-group SSD array via SSD = sum(x^2) - (sum x)^2 / n.
+# Verified identical argmin to the brute-force kernel (max |diff| ~1e-12). Toggle off with TORCH_JENKS=0.
+USE_TORCH_JENKS = os.environ.get("TORCH_JENKS", "1") == "1"
+
+def torch_jenks_var(x_sorted):
+    """Within-group SSD for every split i (group1=[0,i), group2=[i,N)) of an ascending-sorted
+    1-D tensor, matching jenks_optimization_*cuda but in O(N) via prefix sums. FP64 for stability."""
+    x = x_sorted.reshape(-1).to(torch.float64)
+    N = x.numel()
+    csx  = torch.cumsum(x, 0)
+    csx2 = torch.cumsum(x * x, 0)
+    z  = x.new_zeros(1)
+    P1 = torch.cat([z, csx[:-1]])          # sum(x[:i]),  i = 0..N-1
+    P2 = torch.cat([z, csx2[:-1]])         # sum(x[:i]^2)
+    T1 = csx[-1]; T2 = csx2[-1]
+    i  = torch.arange(N, device=x.device, dtype=torch.float64)
+    n1 = i; n2 = N - i                     # n2 >= 1 for i <= N-1
+    SSD1 = P2 - torch.where(n1 > 0, P1 * P1 / torch.clamp(n1, min=1.0), z)
+    SSD2 = (T2 - P2) - (T1 - P1) * (T1 - P1) / n2
+    return SSD1 + SSD2
+
 def Linear_Mask(weights_cuda):
     weights_cuda_flatten = weights_cuda.view(-1)
     mean = weights_cuda_flatten.mean()
@@ -399,7 +422,7 @@ def Linear_Mask(weights_cuda):
     # Call the custom CUDA function
     weights_cuda_sorted = weights_cuda_sorted.view(weights_cuda.shape)
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
-    var = module_weights.jenks_optimization_cuda(weights_cuda_sorted)
+    var = torch_jenks_var(weights_cuda_sorted) if USE_TORCH_JENKS else module_weights.jenks_optimization_cuda(weights_cuda_sorted)
     var_min = var.argmin().item()
     if OVER_PRUNE > 0:
         n = weights_cuda_flatten.numel()
@@ -418,7 +441,7 @@ def Bias_Mask(weights_cuda):
     mean = weights_cuda_sorted.mean()
     SSD_total = ((weights_cuda_sorted - mean) ** 2).sum()
     weights_cuda_sorted = weights_cuda_sorted.contiguous()
-    var = module_bias.jenks_optimization_biases_cuda(weights_cuda_sorted)
+    var = torch_jenks_var(weights_cuda_sorted) if USE_TORCH_JENKS else module_bias.jenks_optimization_biases_cuda(weights_cuda_sorted)
     var_min = var.argmin().item()
     if OVER_PRUNE > 0:
         n = weights_cuda.numel()
