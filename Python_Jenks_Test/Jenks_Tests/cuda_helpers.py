@@ -56,9 +56,18 @@ def load_cuda(cuda_src, cpp_src, funcs, opt=False, verbose=False):
     Returns:
         module: Loaded Python extension module containing the compiled functions.
     """
+    # Build for the ACTUAL GPU's compute capability (A100=80, RTX40=89, RTX30/A10=86, ...)
+    # plus a PTX fallback, instead of a hardcoded sm_86 cubin that no other arch can run.
+    if torch.cuda.is_available():
+        _maj, _min = torch.cuda.get_device_capability()
+        _cc = f"{_maj}{_min}"
+    else:
+        _cc = "80"
+    _arch_flags = ["-gencode", f"arch=compute_{_cc},code=sm_{_cc}",
+                   "-gencode", f"arch=compute_{_cc},code=compute_{_cc}"]  # PTX fallback
     # Use load_inline to compile and load the CUDA and C++ source code
     return load_inline(cuda_sources=[cuda_src], cpp_sources=[cpp_src], functions=funcs,
-                       extra_cuda_cflags=["-O3","--use_fast_math","-Xcompiler", "-fPIC","--ptxas-options=-v","-gencode", "arch=compute_86,code=sm_86"] if opt else [], 
+                       extra_cuda_cflags=(["-O3","--use_fast_math","-Xcompiler","-fPIC","--ptxas-options=-v"] + _arch_flags) if opt else [],
                        verbose=verbose, name=f"inline_ext_{os.getpid()}")
 
 

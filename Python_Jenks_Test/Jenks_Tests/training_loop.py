@@ -1537,6 +1537,8 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
             lr_prune = sum(torch.norm(p)**2 for p in model.parameters() if p.dim() in [2, 4])
             with open(train_filename, "a") as f:
                 print(f"Iteration: {count}| Loss: {loss: .5f}| Acc: {acc.item(): .5f} | Top 5 Acc: {acc5.item(): .5f} |L_2: {l2_reg: .5f} | L_R: {lr_prune: .5f}", file=f)
+            # one_update path returns per-epoch train metrics; record so summary/TB are not 0
+            train_loss, train_acc, train_top5acc = float(loss), acc.item(), acc5.item()
         else:
             for X, y in train_dataloader:
                 # print(torch.cuda.memory_summary())
@@ -1633,10 +1635,11 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
                     max_ema_val_acc = _eacc
                     torch.save(model.state_dict(), f"models/best_ema_{timestamp}_{experiment_name}_{model_name}.pth")
                 model.load_state_dict(_bak)
-        writer.add_scalars(main_tag="Loss", tag_scalar_dict={"train/loss": train_loss, "val/loss": val_loss}, global_step=epoch)
-        writer.add_scalars(main_tag="Accuracy", tag_scalar_dict={"train/acc": train_acc, "val/acc": val_acc}, global_step=epoch)
+        _ntr = max(count, 1); _nva = max(count_val, 1)
+        writer.add_scalars(main_tag="Loss", tag_scalar_dict={"train/loss": train_loss/_ntr, "val/loss": val_loss/_nva}, global_step=epoch)
+        writer.add_scalars(main_tag="Accuracy", tag_scalar_dict={"train/acc": train_acc/_ntr, "val/acc": val_acc/_nva}, global_step=epoch)
         with open("LeNet300_100_MNIST_output/output_(1).txt","a") as f:
-            print(f"Epoch: {epoch}| Train loss: {train_loss: .5f}| Train acc: {train_acc: .5f}| Val loss: {val_loss: .5f}| Val acc: {val_acc: .5f}", file=f)
+            print(f"Epoch: {epoch}| Train loss: {train_loss/_ntr: .5f}| Train acc: {train_acc/_ntr: .5f}| Val loss: {val_loss/_nva: .5f}| Val acc: {val_acc/_nva: .5f}", file=f)
 
 
 
