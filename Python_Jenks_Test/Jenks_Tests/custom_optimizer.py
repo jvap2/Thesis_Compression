@@ -2579,9 +2579,9 @@ class ElementwiseMomentumSGD(Optimizer):
                             # bn, or a protected shortcut: bypass Jenks -> all weights salient
                             mask_tensor = torch.ones_like(param.data, requires_grad=False)
                             GVF_val = 1
-                        torch.cuda.empty_cache()
-                        torch.cuda.synchronize()
-
+                        # (removed per-layer torch.cuda.empty_cache()+synchronize(): a FULL device sync
+                        #  per layer per step that serialized the optimizer loop. Values are unaffected;
+                        #  torch tracks the mask_tensor dependency without a manual barrier.)
                         mask_tensor = mask_tensor.to(self.device)
                         decay_mask = decay_mask.to(self.device)
                         decay_mask *= mask_tensor
