@@ -2348,9 +2348,8 @@ def train_one_step_prune_HPO(net, dataloader, optimizer, criterion, epoch, warmu
                 n_classes = _m.out_features
         cutmix_or_mixup = RandomChoice([CutMix(num_classes=n_classes), MixUp(num_classes=n_classes)])
     for i, (data, label) in enumerate(dataloader):
-        torch.cuda.empty_cache()
-        count+=1
-        start = time.time()
+        count+=1                       # per-step torch.cuda.empty_cache() removed: it forced a full
+        start = time.time()            # device sync every step for no benefit (allocator reuses freed mem)
         data,label = data.to(device), label.to(device)
         label_hard = label  # keep integer labels for accuracy; mixup makes label soft
         if use_mixup:
