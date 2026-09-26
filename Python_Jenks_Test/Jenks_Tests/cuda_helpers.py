@@ -429,7 +429,7 @@ def Linear_Mask(weights_cuda):
         var_min = min(var_min + int(OVER_PRUNE * (n - var_min)), n - 1)
     # Print the output
     ones = weights_cuda_indices[var_min:]
-    arr = torch.zeros(weights_cuda_flatten.shape)
+    arr = torch.zeros(weights_cuda_flatten.shape, device=weights_cuda.device)  # on-device: avoid CPU alloc + H2D copy each layer
     arr[ones] = 1
     arr = arr.reshape(weights_cuda.shape)
     GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # Avoid division by zero
@@ -449,7 +449,7 @@ def Bias_Mask(weights_cuda):
     # Print the output
     # zeros = weights_cuda_indices[:var_min]
     ones = weights_cuda_indices[var_min:]
-    arr = torch.zeros(weights_cuda.shape)
+    arr = torch.zeros(weights_cuda.shape, device=weights_cuda.device)  # on-device: avoid CPU alloc + H2D copy each layer
     arr[ones] = 1
     GVF = (SSD_total - var.min()) / (SSD_total + 1e-8)  # Avoid division by zero
     del weights_cuda_sorted, weights_cuda_indices, var, ones
