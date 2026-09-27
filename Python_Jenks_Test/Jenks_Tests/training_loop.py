@@ -1489,7 +1489,7 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
                     print("Pruning the weights")
                     Prune_Score_v3(model, optimizer, epoch, imp_names, prune_epoch_list, mask=True, mag_prune=mag_prune, filter_based=False, bias_prune=bias_prune, prune_file=prune_filename)
                     prune_count += 1
-                elif not one_shot and epoch>=prune_epoch and epoch % 5 == 0 and sparsity < prune_ratio:
+                elif not one_shot and epoch>=prune_epoch and sparsity < prune_ratio:   # gradual: cadence controlled by outer (epoch-prune_epoch)%prune_between; removed hardcoded epoch%5==0 that skipped prune_epochs not divisible by 5
                     print("Pruning the weights")
                     Prune_Score_v3(model, optimizer, epoch, imp_names, prune_epoch_list, mask=True, mag_prune=mag_prune, filter_based=False, bias_prune=bias_prune, prune_file=prune_filename)
                     prune_count += 1
