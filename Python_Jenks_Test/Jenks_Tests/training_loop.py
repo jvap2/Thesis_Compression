@@ -1444,7 +1444,7 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
                    prune_count=0, one_update=False, EPOCHS=100, sparsity=0.0,
                    prune_epoch_list=None, prune_epoch=0, prune_between=1, prune_ratio=0.5, one_shot=False, mask=True,
                    mag_prune=False, bias_prune=False, kill_velocity=False, l2=0.0, lambda_=0.0, warmup_epochs=0, min_epochs=1, elem_bias = False, accum_steps=1, weight_reset=False,
-                   use_ema=False, ema_decay=0.95, rewind_at_freeze=False):
+                   use_ema=False, ema_decay=0.95, rewind_at_freeze=False, ema_delay=5):
     no_jenks =False
     l2 = True
     mag_prune = True
@@ -1465,8 +1465,9 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
         # iterative freezes when sparsity first reaches prune_ratio (pruning then stops).
         # Track that epoch and (re)seed the EMA buffer there so no mask-churn epoch enters
         # the running average. Until then EMA does not accumulate or get harvested.
-        ema_frozen_epoch = prune_epoch if one_shot else None
-        print(f"EMA enabled (decay={ema_decay}); frozen-mask start epoch = {ema_frozen_epoch}")
+        ema_frozen_epoch = None
+        target_reached_epoch = prune_epoch if one_shot else None   # EMA seeds ema_delay epochs AFTER this
+        print(f"EMA enabled (decay={ema_decay}, seed delay={ema_delay}); target-reached epoch = {target_reached_epoch}")
     while (sparsity < prune_ratio and epoch<EPOCHS) or epoch<=min_epochs:    # Training loop
         print("Epoch: ", epoch)
         epoch += 1
@@ -1512,10 +1513,10 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
                 print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f)
             # Late-EMA freeze detection (iterative path): once the target sparsity is reached
             # pruning stops and the mask is fixed for the rest of training. Seed EMA here.
-            if use_ema and (not one_shot) and ema_frozen_epoch is None and sparsity >= prune_ratio:
-                ema_frozen_epoch = epoch
-                ema = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
-                print(f"EMA: mask frozen at epoch {epoch} (sparsity {float(sparsity): .5f}); EMA buffer reseeded on frozen mask")
+            if use_ema and (not one_shot) and target_reached_epoch is None and sparsity >= prune_ratio:
+                target_reached_epoch = epoch
+                print(f"Target sparsity {float(sparsity): .5f} reached at epoch {epoch}; "
+                      f"EMA will seed at epoch {epoch + ema_delay} (after sparse net + BN stats recover)")
                 # Late warm-restart tied to the (dynamic) freeze epoch: by now the auto-Jenks LR
                 # has decayed far down, leaving the frozen sparse net no headroom to recover. Reset
                 # the LR/WD accumulators to init so the schedule re-anneals over the frozen-mask tail.
@@ -1571,6 +1572,15 @@ def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_
         scheduler.step()
         with open (log_filename,"a") as f:
             print(f"Epoch: {epoch}| Learning Rate: {scheduler.get_last_lr()}", file=f)
+        # Seed EMA once, ema_delay epochs AFTER target sparsity, from the RECOVERED sparse model so
+        # weights AND BatchNorm running stats are mutually consistent. Seeding on the raw abrupt prune
+        # (OVER_PRUNE=0 -> one-shot jump to the Jenks break) pinned EMA at ~random: collapsed seed +
+        # EMA'd BN stats lagging the sparse weights.
+        if use_ema and ema_frozen_epoch is None and target_reached_epoch is not None \
+           and epoch >= target_reached_epoch + ema_delay:
+            ema_frozen_epoch = epoch
+            ema = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+            print(f"EMA seeded at epoch {epoch} from recovered sparse model (target reached at {target_reached_epoch})")
         if use_ema and ema_frozen_epoch is not None and epoch > ema_frozen_epoch:
             _msd = model.state_dict()
             for _k in ema:
