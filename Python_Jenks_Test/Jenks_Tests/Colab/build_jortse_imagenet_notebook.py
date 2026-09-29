@@ -277,28 +277,59 @@ print("bf16 autocast on forward (tensor cores); weights/optimizer/Jenks stay fp3
 
 code("""
 # 6) Run JORTsE  (warmup -> auto-Jenks -> prune @PRUNE_EPOCH -> EMA re-anneal). Checkpoints -> Drive.
-from training_loop import train_val_loop_HPO
+from training_loop import train_val_loop_HPO, train_val_loop_GVF
 os.chdir(DRIVE_DIR)   # best_*.pth / best_ema_*.pth are written to cwd
 # training_loop writes to a couple of hardcoded RELATIVE paths (checkpoints + a legacy log);
 # create them under DRIVE_DIR so the per-epoch writes don't crash.
 os.makedirs("models", exist_ok=True)
 os.makedirs("LeNet300_100_MNIST_output", exist_ok=True)
 EXPERIMENT_NAME = f"jortse_imagenet_{ARCH}_sp{int(PRUNE_RATIO*100)}"
-train_val_loop_HPO(
-    model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy,
-    writer, device,
-    EXPERIMENT_NAME, ARCH, ts,          # experiment_name, model_name, timestamp (positional)
-    train_filename=L("train"), val_filename=L("val"), log_filename=L("log"),
-    sparsity_filename=L("sparsity"), prune_filename=L("prune"), debug_filename=L("debug"),
-    jenks_filename=L("jenks"),
-    prune_count=0, one_update=True, EPOCHS=EPOCHS, sparsity=0.0,
-    prune_epoch_list=[PRUNE_EPOCH, PRUNE_EPOCH + 100], prune_epoch=PRUNE_EPOCH, prune_between=PRUNE_BETWEEN,
-    prune_ratio=PRUNE_RATIO, one_shot=ONE_SHOT, mask=True,
-    mag_prune=True, bias_prune=False, kill_velocity=False,
-    l2=False, lambda_=0, warmup_epochs=WARMUP_EPOCHS, min_epochs=EPOCHS, elem_bias=True,
-    use_ema=True, ema_decay=0.95,
-    rewind_at_freeze=True)   # warm-restart LR/WD to init at the (one-shot-like) prune so the sparse
-                             # net recovers at ~peak LR instead of the decayed ~5e-4 that plateaus it
+
+# ============================ GVF-GATED ABLATION LEVERS ============================
+# Set GVF_GATED=True to run the overnight experiment: every epoch (from GVF_CHECK_FROM, incl.
+# before training) each prunable layer's MAGNITUDE Jenks GVF is measured; any layer whose GVF
+# meets the criterion is pruned by magnitude and FROZEN (mask fixed forever), optimistically
+# forcing the remaining layers to compensate. Once global sparsity >= PRUNE_RATIO, pruning stops,
+# LR/WD rewinds, and EMA runs the recovery tail. Per-layer (epoch,layer,gvf,keep,pruned,frozen)
+# is logged to the *_gvf_*.csv so you can plot GVF trajectories and pick the criterion.
+GVF_GATED      = True     # <-- turn the ablation on
+GVF_THRESH     = 0.64     # GVF criterion; ~0.64 = unimodal-Gaussian baseline. Lower => prune more
+                          #     layers / reach target faster; raise => stricter. Ignored if adaptive.
+GVF_ADAPTIVE   = True     # if True: ignore GVF_THRESH; each epoch prune the HIGH-GVF group
+                          #     (meta-Jenks on the per-layer GVF vector) for guaranteed progressive
+                          #     staggering -> reaches target + auto-protects low-GVF fc/downsamples
+GVF_CHECK_FROM = 0        # first epoch to check (0 = even before any training)
+GVF_EMA_FAILSAFE = True   # if target sparsity is never reached, force-freeze late (EPOCHS-delay-3)
+                          #     so EMA still seeds + harvests a tail (guarantees a usable EMA result)
+# ==================================================================================
+
+if GVF_GATED:
+    train_val_loop_GVF(
+        model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy,
+        writer, device, EXPERIMENT_NAME, ARCH, ts,
+        train_filename=L("train"), val_filename=L("val"), log_filename=L("log"),
+        sparsity_filename=L("sparsity"), prune_filename=L("prune"),
+        gvf_csv=L("gvf").replace(".txt", ".csv"),
+        EPOCHS=EPOCHS, target_sparsity=PRUNE_RATIO, gvf_thresh=GVF_THRESH, gvf_adaptive=GVF_ADAPTIVE,
+        use_ema=True, ema_decay=0.95, ema_delay=5, rewind_at_freeze=True,
+        check_from_epoch=GVF_CHECK_FROM, use_bf16=False,   # model.forward already autocasts (cell 5b)
+        ema_failsafe=GVF_EMA_FAILSAFE, ema_failsafe_tail=3)
+else:
+    train_val_loop_HPO(
+        model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy,
+        writer, device,
+        EXPERIMENT_NAME, ARCH, ts,          # experiment_name, model_name, timestamp (positional)
+        train_filename=L("train"), val_filename=L("val"), log_filename=L("log"),
+        sparsity_filename=L("sparsity"), prune_filename=L("prune"), debug_filename=L("debug"),
+        jenks_filename=L("jenks"),
+        prune_count=0, one_update=True, EPOCHS=EPOCHS, sparsity=0.0,
+        prune_epoch_list=[PRUNE_EPOCH, PRUNE_EPOCH + 100], prune_epoch=PRUNE_EPOCH, prune_between=PRUNE_BETWEEN,
+        prune_ratio=PRUNE_RATIO, one_shot=ONE_SHOT, mask=True,
+        mag_prune=True, bias_prune=False, kill_velocity=False,
+        l2=False, lambda_=0, warmup_epochs=WARMUP_EPOCHS, min_epochs=EPOCHS, elem_bias=True,
+        use_ema=True, ema_decay=0.95,
+        rewind_at_freeze=True)   # warm-restart LR/WD to init at the (one-shot-like) prune so the sparse
+                                 # net recovers at ~peak LR instead of the decayed ~5e-4 that plateaus it
 print("JORTsE done. checkpoints + logs in", DRIVE_DIR)
 """),
 

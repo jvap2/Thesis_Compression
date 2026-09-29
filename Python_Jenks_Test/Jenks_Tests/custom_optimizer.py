@@ -2513,6 +2513,9 @@ class ElementwiseMomentumSGD(Optimizer):
         self.warmup_epochs = warmup_epochs
         self.do_prune_map = do_prune_map
         self.pruning_epochs = pruning_epochs
+        self.gvf_mode = False   # GVF-gated ablation: when True, step() does plain automated-momentum
+                                # (sal_beta) with NO per-step Jenks re-masking. Pruning/masking is
+                                # driven externally (train_val_loop_GVF freezes layers by magnitude).
         super(ElementwiseMomentumSGD, self).__init__(params, defaults)
 
     @torch.no_grad()
@@ -2520,6 +2523,24 @@ class ElementwiseMomentumSGD(Optimizer):
         loss = None
         if closure is not None:
             loss = closure()
+        if getattr(self, 'gvf_mode', False):
+            # Automated-momentum update for every param, no masking. Frozen GVF masks are applied
+            # by the caller (grad zeroed pre-step, weights re-zeroed post-step), so pruned weights
+            # stay dead while everything else trains at the auto sal_beta / auto LR-WD.
+            for group in self.param_groups:
+                lr = group['lr']; weight_decay = group['weight_decay']
+                lr_t = torch.tensor(lr, device=self.device)
+                for param in group['params']:
+                    if param.grad is None:
+                        continue
+                    if 'velocity' not in self.state[param]:
+                        self.state[param]['velocity'] = torch.zeros_like(param.data)
+                    eig_hess = torch.norm(param.grad) ** 2
+                    velocity = self.state[param]['velocity']
+                    sal_beta = (1 - torch.sqrt(lr_t * eig_hess)) ** 2
+                    velocity.mul_(sal_beta).add_(weight_decay * param.data + param.grad)
+                    param.data -= lr * velocity
+            return loss
         if self.epoch < self.warmup_epochs:
             for group in self.param_groups:
                 lr = group['lr']

@@ -1439,6 +1439,208 @@ def train_val_loop_global(model, train_dataloader, val_dataloader, optimizer, lo
         print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f) 
 
 
+def _jenks_gvf_mask(w):
+    """Magnitude 2-class Jenks on |w| (prefix-sum SDCM). Returns (gvf, keep_frac, mask) where the
+    mask keeps the HIGH-|w| group (the kstar lowest-|w| weights are zeroed). GVF = 1 - SDCM/SDAM."""
+    a = w.detach().abs().flatten().float()
+    n = a.numel()
+    if n < 2:
+        return 1.0, 1.0, torch.ones_like(w)
+    s, sidx = torch.sort(a)
+    s = s.double()
+    S1 = torch.zeros(n + 1, dtype=torch.double, device=a.device)
+    S2 = torch.zeros(n + 1, dtype=torch.double, device=a.device)
+    S1[1:] = torch.cumsum(s, 0); S2[1:] = torch.cumsum(s * s, 0)
+    k = torch.arange(1, n, dtype=torch.double, device=a.device)
+    left  = S2[1:n] - S1[1:n] ** 2 / k
+    right = (S2[n] - S2[1:n]) - (S1[n] - S1[1:n]) ** 2 / (n - k)
+    sdcm = left + right
+    kstar = int(torch.argmin(sdcm).item()) + 1          # lower group (kstar smallest |w|) -> pruned
+    sdam = (S2[n] - S1[n] ** 2 / n).item()
+    gvf = float(1 - (sdcm.min().item() / sdam)) if sdam > 0 else 0.0
+    keep = (n - kstar) / n
+    mask = torch.ones(n, device=w.device, dtype=w.dtype)
+    mask[sidx[:kstar]] = 0
+    return gvf, keep, mask.reshape(w.shape)
+
+
+def train_val_loop_GVF(model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler,
+                       accuracy, top5accuracy, writer, device, experiment_name, model_name, timestamp,
+                       train_filename, val_filename, log_filename, sparsity_filename, prune_filename,
+                       gvf_csv, EPOCHS=40, target_sparsity=0.75, gvf_thresh=0.64, gvf_adaptive=False,
+                       use_ema=True, ema_decay=0.95, ema_delay=5, rewind_at_freeze=True,
+                       check_from_epoch=0, use_bf16=True, ema_failsafe=True, ema_failsafe_tail=3):
+    """GVF-gated progressive pruning ablation (prune by MAGNITUDE, freeze layer after pruning).
+    Every epoch (from check_from_epoch, incl. before the first training step) compute each prunable
+    (dim in [2,4]) layer's magnitude-Jenks GVF; any layer with GVF >= gvf_thresh is pruned by
+    magnitude and FROZEN (its mask never changes again), optimistically forcing the rest to
+    compensate. Once global sparsity >= target_sparsity, pruning stops, LR/WD rewinds, and EMA runs
+    the recovery tail. Layerwise (epoch, layer, gvf, keep_frac, pruned_this_epoch, frozen) -> gvf_csv."""
+    import csv as _csv
+    optimizer.gvf_mode = True                       # plain automated momentum; no dynamic Jenks
+    prunable = [(n, p) for n, p in model.named_parameters() if p.dim() in (2, 4)]
+    for _n, p in model.named_parameters():
+        if p not in optimizer.state:
+            optimizer.state[p] = {}
+        optimizer.state[p]['mask'] = torch.ones_like(p.data, requires_grad=False)
+    frozen = set()
+    with open(gvf_csv, 'w', newline='') as f:
+        _csv.writer(f).writerow(['epoch', 'layer', 'gvf', 'keep_frac', 'pruned_this_epoch', 'frozen'])
+
+    def _sparsity():
+        nz = sum(torch.count_nonzero(p) for _, p in prunable)
+        tot = sum(p.numel() for _, p in prunable)
+        return float(1 - nz / tot)
+
+    max_val_acc = 0.0; max_ema_val_acc = 0.0
+    ema = None; ema_frozen_epoch = None; target_reached_epoch = None
+    sparsity = 0.0
+    print(f"GVF-gated: thresh={gvf_thresh} adaptive={gvf_adaptive} target={target_sparsity} "
+          f"EMA(decay={ema_decay},delay={ema_delay}) rewind={rewind_at_freeze}")
+
+    failsafe_epoch = EPOCHS - ema_delay - max(ema_failsafe_tail, 1)   # latest freeze that still leaves an EMA tail
+    for epoch in range(1, EPOCHS + 1):
+        print("Epoch: ", epoch)
+        # ---- EMA failsafe: if the GVF criterion never drove sparsity to target, force-freeze the
+        # current (partial) masks late enough that EMA still seeds and harvests a recovery tail. ----
+        if use_ema and ema_failsafe and target_reached_epoch is None and epoch >= failsafe_epoch:
+            target_reached_epoch = epoch
+            _sp = _sparsity()
+            print(f"[EMA failsafe] target sparsity not reached (at {_sp:.5f}); force-freezing at epoch "
+                  f"{epoch}; EMA seeds at {epoch + ema_delay}")
+            if rewind_at_freeze and hasattr(scheduler, "reset_accumulators"):
+                scheduler.reset_accumulators()
+                print(f"Late LR/WD rewind at failsafe freeze (epoch {epoch})")
+        # ---- GVF check + prune/freeze (BEFORE training this epoch) ----
+        if (epoch - 1) >= check_from_epoch and target_reached_epoch is None:
+            gvfs = {}
+            for name, p in prunable:
+                if p in frozen:
+                    continue
+                g, keep, m = _jenks_gvf_mask(p.data)
+                gvfs[name] = (g, keep, m, p)
+            if gvf_adaptive and len(gvfs) >= 4:
+                gv = torch.tensor([v[0] for v in gvfs.values()])
+                _, _, gm = _jenks_gvf_mask(gv)      # meta-Jenks on the GVF vector; high group -> prune
+                nl = list(gvfs.keys())
+                to_prune = {nl[i] for i in range(len(nl)) if gm.flatten()[i] > 0}
+            else:
+                to_prune = {nm for nm, v in gvfs.items() if v[0] >= gvf_thresh}
+            for name, p in prunable:
+                if name not in gvfs:
+                    continue
+                g, keep, m, _ = gvfs[name]
+                pruned_now = 0
+                if name in to_prune and p not in frozen and sparsity < target_sparsity:
+                    optimizer.state[p]['mask'] = m.to(p.device)
+                    p.data.mul_(optimizer.state[p]['mask'])
+                    frozen.add(p); pruned_now = 1
+                    print(f"  [GVF] prune+freeze {name}: GVF={g:.3f} keep={keep*100:.1f}%")
+                with open(gvf_csv, 'a', newline='') as f:
+                    _csv.writer(f).writerow([epoch, name, f"{g:.4f}", f"{keep:.4f}", pruned_now, int(p in frozen)])
+            sparsity = _sparsity()
+            with open(sparsity_filename, "a") as f:
+                print(f"Epoch: {epoch}| Sparsity: {sparsity: .5f}", file=f)
+            if sparsity >= target_sparsity and target_reached_epoch is None:
+                target_reached_epoch = epoch
+                print(f"Target sparsity {sparsity:.5f} reached at epoch {epoch}; EMA seeds at {epoch + ema_delay}")
+                if rewind_at_freeze and hasattr(scheduler, "reset_accumulators"):
+                    scheduler.reset_accumulators()
+                    print(f"Late LR/WD rewind at freeze (epoch {epoch})")
+
+        # ---- train ----
+        model.train()
+        with open(train_filename, "a") as f:
+            print(f"Epoch: {epoch}| Learning Rate: {scheduler.get_last_lr()}", file=f)
+        start = time(); count = 0; tl = ta = t5 = 0.0
+        print(f"Memory free: {get_memory_free_MiB(0)} MiB")
+        for X, y in train_dataloader:
+            count += 1
+            X, y = X.to(device), y.to(device)
+            optimizer.zero_grad()
+            if use_bf16:
+                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                    pred = model(X); loss = loss_fn(pred, y)
+            else:
+                pred = model(X); loss = loss_fn(pred, y)
+            loss.backward()
+            for p in frozen:                        # keep pruned weights dead (no gradient)
+                if p.grad is not None:
+                    p.grad.mul_(optimizer.state[p]['mask'])
+            optimizer.step()
+            for p in frozen:                        # and exactly zero after the step
+                p.data.mul_(optimizer.state[p]['mask'])
+            ta += accuracy(pred, y).item(); t5 += top5accuracy(pred, y).item(); tl += loss.item()
+        with open(train_filename, "a") as f:
+            print(f"Iteration: {count}| Loss: {tl/max(count,1): .5f}| Acc: {ta/max(count,1): .5f} | Top 5 Acc: {t5/max(count,1): .5f}", file=f)
+        print(f"Time taken for epoch: {time()-start}")
+        scheduler.step()
+        with open(log_filename, "a") as f:
+            print(f"Epoch: {epoch}| Learning Rate: {scheduler.get_last_lr()}", file=f)
+
+        # ---- EMA seed (delay after target) / accumulate over frozen mask ----
+        if use_ema and ema_frozen_epoch is None and target_reached_epoch is not None \
+           and epoch >= target_reached_epoch + ema_delay:
+            ema_frozen_epoch = epoch
+            ema = {k: v.detach().clone().float() for k, v in model.state_dict().items()}
+            print(f"EMA seeded at epoch {epoch} from recovered sparse model (target at {target_reached_epoch})")
+        if use_ema and ema_frozen_epoch is not None and epoch > ema_frozen_epoch:
+            msd = model.state_dict()
+            for k in ema:
+                v = msd[k]
+                if v.dtype.is_floating_point:
+                    ema[k].mul_(ema_decay).add_(v.detach().float(), alpha=1.0 - ema_decay)
+                else:
+                    ema[k].copy_(v)
+            for n_, p_ in model.named_parameters():
+                if n_ in ema and p_ in optimizer.state and 'mask' in optimizer.state[p_]:
+                    ema[n_].mul_(optimizer.state[p_]['mask'].float())
+
+        # ---- val ----
+        model.eval()
+        with torch.inference_mode():
+            with open(val_filename, "a") as f:
+                print(f"Epoch: {epoch}", file=f)
+            vl = va = v5 = 0.0; cv = 0
+            for X, y in val_dataloader:
+                cv += 1; X, y = X.to(device), y.to(device)
+                yp = model(X); vl += loss_fn(yp, y).item()
+                va += accuracy(yp, y); v5 += top5accuracy(yp, y)
+                with open(val_filename, "a") as f:
+                    print(f"Iteration: {cv}| Loss: {vl/cv: .5f}| Acc: {va/cv: .5f} | Top 5 Acc {v5/cv}", file=f)
+            track_ok = (ema_frozen_epoch is not None and epoch > ema_frozen_epoch) if use_ema else (target_reached_epoch is not None)
+            if va/cv > max_val_acc and track_ok:
+                max_val_acc = va/cv
+                torch.save(model.state_dict(), f"models/best_{timestamp}_{experiment_name}_{model_name}.pth")
+            if use_ema and ema_frozen_epoch is not None and epoch > ema_frozen_epoch:
+                bak = {k: v.detach().clone() for k, v in model.state_dict().items()}
+                model.load_state_dict({k: ema[k].to(bak[k].dtype) for k in ema})
+                ea, ec = 0.0, 0
+                for Xe, ye in val_dataloader:
+                    Xe, ye = Xe.to(device), ye.to(device)
+                    ea += (model(Xe).argmax(1) == ye).float().mean(); ec += 1
+                ea = ea/ec
+                with open(val_filename, "a") as f:
+                    print(f"Epoch: {epoch}| EMA Val Acc: {ea: .5f}", file=f)
+                if ea > max_ema_val_acc:
+                    max_ema_val_acc = ea
+                    torch.save(model.state_dict(), f"models/best_ema_{timestamp}_{experiment_name}_{model_name}.pth")
+                model.load_state_dict(bak)
+        writer.add_scalars("Accuracy", {"train/acc": ta/max(count,1), "val/acc": va/max(cv,1)}, epoch)
+
+    fs = _sparsity()
+    # Safety net: always save the final model (so a run that never reaches target_sparsity -> no
+    # EMA seed / no plain-best track still leaves a recoverable sparse checkpoint).
+    torch.save(model.state_dict(), f"models/final_{timestamp}_{experiment_name}_{model_name}.pth")
+    with open(sparsity_filename, "a") as f:
+        print(f"Epoch: {epoch}| Sparsity: {fs: .5f}", file=f)
+    with open(val_filename, "a") as f:
+        print(f"Best validation accuracy achieved: {max_val_acc: .5f}", file=f)
+        if use_ema:
+            print(f"Best EMA validation accuracy achieved: {max_ema_val_acc: .5f}", file=f)
+    print(f"GVF run done. final sparsity {fs:.5f} | best plain {max_val_acc:.5f} | best EMA {max_ema_val_acc:.5f} | target_reached={target_reached_epoch}")
+
+
 def train_val_loop_HPO(model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy, writer, device, experiment_name, model_name, timestamp,
                    train_filename, val_filename, log_filename, sparsity_filename, prune_filename, debug_filename, jenks_filename,
                    prune_count=0, one_update=False, EPOCHS=100, sparsity=0.0,
