@@ -2516,6 +2516,11 @@ class ElementwiseMomentumSGD(Optimizer):
         self.gvf_mode = False   # GVF-gated ablation: when True, step() does plain automated-momentum
                                 # (sal_beta) with NO per-step Jenks re-masking. Pruning/masking is
                                 # driven externally (train_val_loop_GVF freezes layers by magnitude).
+        self.gvf_saliency = False  # GVF-gated + saliency variant: when True AND gvf_mode, the layers
+                                # that are NOT yet frozen keep JORTsE's per-step dynamic Jenks saliency
+                                # (recompute mask on |w*grad|, damp un-salient grads, unsal_beta decay);
+                                # frozen (GVF-pruned) layers stay hard-dead. Isolates "does the saliency
+                                # training dynamic on the still-active layers help GVF recovery?"
         super(ElementwiseMomentumSGD, self).__init__(params, defaults)
 
     @torch.no_grad()
@@ -2524,22 +2529,48 @@ class ElementwiseMomentumSGD(Optimizer):
         if closure is not None:
             loss = closure()
         if getattr(self, 'gvf_mode', False):
-            # Automated-momentum update for every param, no masking. Frozen GVF masks are applied
-            # by the caller (grad zeroed pre-step, weights re-zeroed post-step), so pruned weights
-            # stay dead while everything else trains at the auto sal_beta / auto LR-WD.
+            # Automated-momentum update. Frozen GVF-pruned layers are held dead (their fixed mask is
+            # re-applied here AND by the caller). If gvf_saliency is on, the layers that are NOT yet
+            # frozen additionally run JORTsE's per-step dynamic Jenks saliency (recompute mask on
+            # |w*grad|, damp un-salient grads, unsal_beta = (1-sqrt(lr*wd))^2 decay on the un-salient
+            # group) -- so the still-active layers train under the full saliency dynamic instead of
+            # plain sal_beta momentum. Weights can re-enter the salient set (soft/dynamic, GSM-style).
+            use_sal = getattr(self, 'gvf_saliency', False)
             for group in self.param_groups:
                 lr = group['lr']; weight_decay = group['weight_decay']
                 lr_t = torch.tensor(lr, device=self.device)
+                wd_t = torch.tensor(weight_decay, device=self.device)
                 for param in group['params']:
                     if param.grad is None:
                         continue
                     if 'velocity' not in self.state[param]:
                         self.state[param]['velocity'] = torch.zeros_like(param.data)
-                    eig_hess = torch.norm(param.grad) ** 2
                     velocity = self.state[param]['velocity']
+                    is_frozen = self.state[param].get('frozen', False)
+                    if use_sal and not is_frozen and param.dim() in (2, 4):
+                        sign_WB = param.data if self.mag else (param.data * param.grad)
+                        WB = torch.abs(sign_WB)
+                        pname = self.name_map.get(param, '') if self.name_map else ''
+                        if ('bn' not in pname) and WB.numel() and torch.unique(WB).numel() > 1:
+                            mask_tensor, _gvf = compute_mask(param, WB, self.filter_based, self.bias_prune)
+                            mask_tensor = mask_tensor.to(self.device)
+                            eig_hess = torch.norm(param.grad * mask_tensor) ** 2
+                            unsal_beta = (1 - torch.sqrt(lr_t * wd_t)) ** 2
+                            sal_beta = (1 - torch.sqrt(lr_t * eig_hess)) ** 2
+                            beta_tensor = unsal_beta + mask_tensor * (sal_beta - unsal_beta)
+                            param.grad.mul_(mask_tensor)
+                            velocity.mul_(beta_tensor).add_(weight_decay * param.data + param.grad)
+                            param.data -= lr * velocity
+                            continue
+                    # frozen layer, non-weight tensor (bias/bn), or saliency off -> plain auto-momentum
+                    if is_frozen:
+                        param.grad.mul_(self.state[param]['mask'])
+                    eig_hess = torch.norm(param.grad) ** 2
                     sal_beta = (1 - torch.sqrt(lr_t * eig_hess)) ** 2
                     velocity.mul_(sal_beta).add_(weight_decay * param.data + param.grad)
                     param.data -= lr * velocity
+                    if is_frozen:
+                        param.data.mul_(self.state[param]['mask'])
             return loss
         if self.epoch < self.warmup_epochs:
             for group in self.param_groups:

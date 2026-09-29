@@ -301,6 +301,11 @@ GVF_ADAPTIVE   = True     # if True: ignore GVF_THRESH; each epoch prune the HIG
 GVF_CHECK_FROM = 0        # first epoch to check (0 = even before any training)
 GVF_EMA_FAILSAFE = True   # if target sparsity is never reached, force-freeze late (EPOCHS-delay-3)
                           #     so EMA still seeds + harvests a tail (guarantees a usable EMA result)
+GVF_SALIENCY   = False    # if True: the layers NOT yet GVF-frozen keep JORTsE's per-step dynamic
+                          #     Jenks saliency (recompute mask on |w*grad|, damp un-salient grads +
+                          #     unsal_beta decay) instead of plain auto-momentum. Ablation: does the
+                          #     saliency TRAINING DYNAMIC on still-active layers help GVF recovery?
+                          #     (Slower/epoch -- Jenks per non-frozen layer per step, like full JORTsE.)
 # ==================================================================================
 
 if GVF_GATED:
@@ -313,7 +318,7 @@ if GVF_GATED:
         EPOCHS=EPOCHS, target_sparsity=PRUNE_RATIO, gvf_thresh=GVF_THRESH, gvf_adaptive=GVF_ADAPTIVE,
         use_ema=True, ema_decay=0.95, ema_delay=5, rewind_at_freeze=True,
         check_from_epoch=GVF_CHECK_FROM, use_bf16=False,   # model.forward already autocasts (cell 5b)
-        ema_failsafe=GVF_EMA_FAILSAFE, ema_failsafe_tail=3)
+        ema_failsafe=GVF_EMA_FAILSAFE, ema_failsafe_tail=3, gvf_saliency=GVF_SALIENCY)
 else:
     train_val_loop_HPO(
         model, train_dataloader, val_dataloader, optimizer, loss_fn, scheduler, accuracy, top5accuracy,

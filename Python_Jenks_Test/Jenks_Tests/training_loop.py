@@ -1469,7 +1469,8 @@ def train_val_loop_GVF(model, train_dataloader, val_dataloader, optimizer, loss_
                        train_filename, val_filename, log_filename, sparsity_filename, prune_filename,
                        gvf_csv, EPOCHS=40, target_sparsity=0.75, gvf_thresh=0.64, gvf_adaptive=False,
                        use_ema=True, ema_decay=0.95, ema_delay=5, rewind_at_freeze=True,
-                       check_from_epoch=0, use_bf16=True, ema_failsafe=True, ema_failsafe_tail=3):
+                       check_from_epoch=0, use_bf16=True, ema_failsafe=True, ema_failsafe_tail=3,
+                       gvf_saliency=False):
     """GVF-gated progressive pruning ablation (prune by MAGNITUDE, freeze layer after pruning).
     Every epoch (from check_from_epoch, incl. before the first training step) compute each prunable
     (dim in [2,4]) layer's magnitude-Jenks GVF; any layer with GVF >= gvf_thresh is pruned by
@@ -1477,13 +1478,17 @@ def train_val_loop_GVF(model, train_dataloader, val_dataloader, optimizer, loss_
     compensate. Once global sparsity >= target_sparsity, pruning stops, LR/WD rewinds, and EMA runs
     the recovery tail. Layerwise (epoch, layer, gvf, keep_frac, pruned_this_epoch, frozen) -> gvf_csv."""
     import csv as _csv
-    optimizer.gvf_mode = True                       # plain automated momentum; no dynamic Jenks
+    optimizer.gvf_mode = True                       # external pruning; no per-step Jenks re-masking...
+    optimizer.gvf_saliency = gvf_saliency           # ...unless True: not-yet-frozen layers keep the
+                                                    # JORTsE dynamic saliency (see optimizer step()).
     prunable = [(n, p) for n, p in model.named_parameters() if p.dim() in (2, 4)]
     for _n, p in model.named_parameters():
         if p not in optimizer.state:
             optimizer.state[p] = {}
         optimizer.state[p]['mask'] = torch.ones_like(p.data, requires_grad=False)
+        optimizer.state[p]['frozen'] = False        # set True when GVF-pruned so step() holds it dead
     frozen = set()
+    print(f"GVF-gated saliency dynamic on not-yet-frozen layers: {gvf_saliency}")
     with open(gvf_csv, 'w', newline='') as f:
         _csv.writer(f).writerow(['epoch', 'layer', 'gvf', 'keep_frac', 'pruned_this_epoch', 'frozen'])
 
@@ -1534,6 +1539,7 @@ def train_val_loop_GVF(model, train_dataloader, val_dataloader, optimizer, loss_
                 if name in to_prune and p not in frozen and sparsity < target_sparsity:
                     optimizer.state[p]['mask'] = m.to(p.device)
                     p.data.mul_(optimizer.state[p]['mask'])
+                    optimizer.state[p]['frozen'] = True   # step() now holds this layer hard-dead
                     frozen.add(p); pruned_now = 1
                     print(f"  [GVF] prune+freeze {name}: GVF={g:.3f} keep={keep*100:.1f}%")
                 with open(gvf_csv, 'a', newline='') as f:
