@@ -2586,7 +2586,7 @@ class ElementwiseMomentumSGD(Optimizer):
                         self.state[param]['velocity'] = torch.zeros_like(param.data)
                     eig_hess = torch.norm(param.grad)**2
                     velocity = self.state[param]['velocity']
-                    sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
+                    sal_beta = momentum if getattr(self, 'fixed_beta', False) else (1 - torch.sqrt(lr_t * eig_hess))**2
                     # Update velocity
                     velocity.mul_(sal_beta).add_(weight_decay * param.data + param.grad)
 
@@ -2639,12 +2639,13 @@ class ElementwiseMomentumSGD(Optimizer):
                         ## OTherwise, beta = (1-\sqrt{lr*h})^2 where h is an approximation of the curvature
                         ## h = ||param.grad||^2_2
                         eig_hess = torch.norm(param.grad*mask_tensor)**2
-                        unsal_beta = (1 - torch.sqrt(lr_t * wd_t))**2
-                        sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
-                        # beta = sal_beta where mask==1, unsal_beta where mask==0. mask is exactly 0/1, so this
-                        # arithmetic form is identical in value but avoids the per-layer boolean-index
-                        # (nonzero + index_put) launches/syncs. Momentum coefficient unchanged.
-                        beta_tensor = unsal_beta + mask_tensor * (sal_beta - unsal_beta)
+                        if getattr(self, 'fixed_beta', False):
+                            beta_tensor = momentum          # JORTs: constant momentum (disables auto sal/unsal beta)
+                        else:
+                            unsal_beta = (1 - torch.sqrt(lr_t * wd_t))**2
+                            sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
+                            # beta = sal_beta where mask==1, unsal_beta where mask==0 (arithmetic form avoids index_put).
+                            beta_tensor = unsal_beta + mask_tensor * (sal_beta - unsal_beta)
                         param.grad.mul_(mask_tensor)
                         update = weight_decay * param.data + param.grad
                         if 'velocity' not in self.state[param]:
@@ -2662,7 +2663,7 @@ class ElementwiseMomentumSGD(Optimizer):
                             self.state[param]['velocity'] = torch.zeros_like(param.data)
                         eig_hess = torch.norm(param.grad)**2
                         velocity = self.state[param]['velocity']
-                        sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
+                        sal_beta = momentum if getattr(self, 'fixed_beta', False) else (1 - torch.sqrt(lr_t * eig_hess))**2
                         # Update velocity
                         velocity.mul_(sal_beta).add_(weight_decay * param.data + param.grad)
 
@@ -2706,7 +2707,7 @@ class ElementwiseMomentumSGD(Optimizer):
                     param.grad.mul_(self.state[param]['mask'])
                     eig_hess = torch.norm(param.grad)**2
                     velocity = self.state[param]['velocity']
-                    sal_beta = (1 - torch.sqrt(lr_t * eig_hess))**2
+                    sal_beta = momentum if getattr(self, 'fixed_beta', False) else (1 - torch.sqrt(lr_t * eig_hess))**2
                     # Update velocity
                     velocity.mul_(sal_beta).add_(weight_decay * param.data + param.grad)
 

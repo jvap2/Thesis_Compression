@@ -300,10 +300,11 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
         self.b = torch.ones(len(optimizer.param_groups), device=optimizer.param_groups[0]['params'][0].device)
         self.adjustable = adjustable
         size = len(self.optimizer.param_groups)
-        if self.wd_adj:
-            self.M = torch.zeros(size, device=self.optimizer.param_groups[0]['params'][0].device)
-            self.P = torch.zeros(size, device=self.optimizer.param_groups[0]['params'][0].device)
-            self.init_lr = torch.zeros_like(self.a)
+        # init_lr drives the auto-LR schedule (always needed); M,P are the auto-WD accumulators
+        # (created unconditionally so wd_adj=False still constructs; they stay unused when wd_adj=False).
+        self.M = torch.zeros(size, device=self.optimizer.param_groups[0]['params'][0].device)
+        self.P = torch.zeros(size, device=self.optimizer.param_groups[0]['params'][0].device)
+        self.init_lr = torch.zeros_like(self.a)
         # store initial wd as tensor on same device/dtype
         self.init_wd = torch.tensor([group.get("weight_decay", 0.0) for group in self.optimizer.param_groups],
                                     device=self.optimizer.param_groups[0]['params'][0].device, dtype=self.a.dtype)
@@ -383,8 +384,9 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
             return scaled_lrs
         elif self.last_epoch >= self.warmup_iters:
             scaled_lrs = []
+            const_lr = getattr(self, 'constant_lr', False)   # JORTs: hold LR at init (disables auto self-decay)
             for i,group in enumerate(self.optimizer.param_groups):
-                lr_t = torch.sqrt(self.b[i]**2 + self.a[i]) - self.b[i]
+                lr_t = self.init_lr[i] if const_lr else torch.sqrt(self.b[i]**2 + self.a[i]) - self.b[i]
                 # stabilize division with eps; avoid lr_t being zero
                 if self.wd_adj:
                     eps = 1e-12
@@ -394,9 +396,10 @@ class WarmupAutoJenks(torch.optim.lr_scheduler._LRScheduler):
                     self.P[i] += wd
                     # update param group weight decay deterministically (no cumulative multiplication)
                     group["weight_decay"] = float(wd.clamp(min=0.0).item())
-                # update a,b with tensor lr
-                self.a[i] += lr_t**2
-                self.b[i] += lr_t
+                if not const_lr:
+                    # update a,b with tensor lr (frozen when LR is held constant)
+                    self.a[i] += lr_t**2
+                    self.b[i] += lr_t
                 scaled_lrs.append(lr_t.item())
             return scaled_lrs
     def step(self, epoch=None, metric=None):
